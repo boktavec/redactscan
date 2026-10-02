@@ -1,0 +1,58 @@
+version: "3"
+
+tasks:
+
+  setup:
+    desc: Install project dependencies
+    cmds:
+      - go mod download
+
+  run:
+    desc: Run redactscan locally
+    cmds:
+      - go run ./cmd/redactscan
+
+  build:
+    desc: Build the CLI
+    cmds:
+      - go build -o ./bin/redactscan ./cmd/redactscan
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - gofmt -w .
+
+  lint:
+    desc: Run Go linters
+    cmds:
+      - golangci-lint run
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test ./...
+
+  vuln:
+    desc: Scan Go dependencies for known vulnerabilities
+    cmds:
+      - govulncheck ./...
+
+  security:
+    desc: Run security checks
+    cmds:
+      - gosec ./...
+      - govulncheck ./...
+
+  secrets:
+    desc: Check repository for committed secrets
+    cmds:
+      - gitleaks git .
+
+  verify:
+    desc: Run all local verification
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: test
+      - task: security
+      - task: secrets
