@@ -1,0 +1,13 @@
+{
+  "packages": [
+    {
+      "source": "npm:pi-subagents@0.77.0",
+      "extensions": ["./index.js"],
+      "skills": [],
+      "prompts": []
+    }
+  ],
+  "subagents": {
+    "projectRootResolution": "git-root"
+  }
+}
