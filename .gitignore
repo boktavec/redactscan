@@ -33,3 +33,6 @@ go.work.sum
 
 # Pi package installs
 .pi/npm/
+
+# visual-plan local bridge token
+.plan-url
