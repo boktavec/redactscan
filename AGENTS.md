@@ -59,7 +59,7 @@ Keep MCP credentials out of the repository and do not paste them into issues, pl
 
 ## Planning and PR Recaps
 
-All planning must use the `visual-plan` skill. Save an approved spec at `docs/features/<short-slug>/spec.md` and record an ADR in `docs/adr/` for decisions with long-term impact. Label claims about third-party behavior **Verified** (and how) or **Assumed**.
+All planning must use the `visual-plan` skill in local-files mode; the `senior-engineering-planner` agent creates the plan under `plans/<short-slug>/`. Save an approved spec at `docs/features/<short-slug>/spec.md` and record an ADR in `docs/adr/` for decisions with long-term impact. Label claims about third-party behavior **Verified** (and how) or **Assumed**.
 
 PRs marked ready for review get a visual recap from `.github/workflows/pr-visual-recap.yml` (draft PRs are skipped; pushes do not re-run it, so add the `recap` label to regenerate). Use `visual-recap` to preview one locally. The workflow disables AGENTS.md loading for the recap agent so it does not run the checks below; normal CI owns testing and security verification.
 
@@ -67,7 +67,7 @@ PRs marked ready for review get a visual recap from `.github/workflows/pr-visual
 
 Agent definitions live in `.claude/agents/` (Claude Code) and `.pi/agents/` (Pi); the Pi definitions reuse the corresponding Claude prompt as their role source of truth. Agents do not invoke one another; the main agent orchestrates the pipeline using the client's available subagent mechanism:
 
-1. **Plan:** use `senior-engineering-planner` to interview the user (relay one question at a time, resuming it with the answer), then render the plan with `visual-plan`. For new trust boundaries or security-sensitive design, have `security-reviewer` review the design before seeking approval and incorporate its requirements.
+1. **Plan:** use `senior-engineering-planner` to interview the user (relay one question at a time, resuming it with the answer), which saves the spec and creates the local visual plan itself. For new trust boundaries or security-sensitive design, have `security-reviewer` review the design before seeking approval and incorporate its requirements.
 2. **Implement:** after the user approves the plan, use `senior-software-engineer` with the spec path. Run parallel implementers in separate worktrees or sequentially; never in the same files at once.
 3. **Review:** use `staff-engineering-reviewer` with the spec path, the diff, and the implementer's handoff. Independently use `security-reviewer` for changes that touch file or path handling, symlinks, quarantine, redaction, scanned-content parsing, secrets, or CI credentials; give it the same context. Do not substitute the general reviewer's security checks.
 4. **Fix loop:** on CHANGES REQUIRED from either reviewer, resume the implementer with the findings, then re-run the relevant reviewer. Repeat until the staff reviewer reports PASS or PASS WITH ADVISORIES and, when invoked, the security reviewer reports PASS.
