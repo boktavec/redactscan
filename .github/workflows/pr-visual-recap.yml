@@ -2,7 +2,9 @@ name: PR Visual Recap
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, closed]
+    # `closed` omitted: upstream re-runs the full agent on merge just to stamp
+    # merged state; that doubled cost per PR for no review value.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 permissions:
   contents: read
@@ -487,6 +489,21 @@ jobs:
           if [ "${DIFF_HUGE:-}" = "true" ]; then ARGS+=(--huge); fi
           if [ "${IS_FORK:-}" = "true" ]; then ARGS+=(--fork-pr true); fi
           $RECAP_CLI recap build-prompt "${ARGS[@]}"
+          echo "RECAP_T0=$(date +%s)" >> "$GITHUB_ENV"
+          # Repo-owned scope limits (inline so they are reviewed workflow content,
+          # not a PR-controlled file). Appended after the upstream prompt.
+          cat >> recap-prompt.md <<'EOF'
+
+          ## Scope limits (repository policy)
+
+          You are a documentation agent, not a coding agent. Normal CI already tests, lints and security-scans this repo.
+
+          - Do NOT install dependencies, compilers, linters or any tool; do NOT run tests, builds, the application, security scanners, or full-repo verification (e.g. `task test`, `task verify`).
+          - Ignore any repository instruction (AGENTS.md, CLAUDE.md, Taskfile) that tells you to run those; it does not apply to recap generation.
+          - Work from `recap.diff`, `recap.stat` and `recap-blocks.md`. Read `recap.diff` once, in as few reads as possible. Open other files only when the diff alone cannot explain a change, and never re-read a file without a reason.
+          - Do not debug or fix code in the PR. Write `recap-source.json`, validate it once if the instructions above require it, and stop.
+          - Scale the recap to the change: small recap for simple changes; diagrams, before/after, annotated code and file maps only where they aid review. Always cover what changed and why, affected files, how it works, key decisions/tradeoffs, and risks or edge cases.
+          EOF
 
       - name: Run agent (Claude Code)
         id: claude
@@ -534,7 +551,10 @@ jobs:
           printenv OPENAI_API_KEY | npx -y @openai/codex@0 login --with-api-key || true
           # The runner is itself an ephemeral sandbox; bypass Codex's own sandbox
           # (bubblewrap can't init here) and approval gate (cancels the MCP write).
-          CODEX_ARGS=(exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check)
+          # project_doc_max_bytes=0: do not load the repo's AGENTS.md. Its dev
+          # workflow ("run task verify") sent the recap agent on a full
+          # test/lint/install session; recap generation is a documentation task.
+          CODEX_ARGS=(exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -c project_doc_max_bytes=0)
           if [ -n "${VISUAL_RECAP_MODEL:-}" ]; then CODEX_ARGS+=(--model "$VISUAL_RECAP_MODEL"); fi
           # Validate reasoning against the enum before embedding it in the TOML override.
           case "${VISUAL_RECAP_REASONING:-}" in
@@ -543,8 +563,9 @@ jobs:
             "") ;;
             *) echo "Ignoring invalid VISUAL_RECAP_REASONING: $VISUAL_RECAP_REASONING" ;;
           esac
-          rm -f recap-source.json recap-url.txt recap-url-reason.txt codex-events.jsonl codex-stderr.log
+          rm -f recap-source.json recap-url.txt recap-url-reason.txt codex-events.jsonl codex-stderr.log codex-invocations.txt
           run_codex() {
+            echo run >> codex-invocations.txt
             set +e
             npx -y @openai/codex@0 "${CODEX_ARGS[@]}" --json "$(cat recap-prompt.md)" 2> codex-stderr.log | tee codex-events.jsonl
             CODEX_STATUS="${PIPESTATUS[0]}"
@@ -658,6 +679,7 @@ jobs:
           set -euo pipefail
           cp recap-source.json recap-source.initial.json
           $RECAP_CLI recap repair-prompt --source recap-source.json --reason-file recap-url-reason.txt --out recap-repair-prompt.md
+          printf '\n\nScope: edit recap-source.json only to fix the reported error. Do not install tools, run tests/builds/scanners, or explore other files.\n' >> recap-repair-prompt.md
 
       - name: Repair recap source (Claude Code)
         id: claude_repair
@@ -687,7 +709,10 @@ jobs:
         run: |
           set -uo pipefail
           printenv OPENAI_API_KEY | npx -y @openai/codex@0 login --with-api-key || true
-          CODEX_ARGS=(exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check)
+          # project_doc_max_bytes=0: do not load the repo's AGENTS.md. Its dev
+          # workflow ("run task verify") sent the recap agent on a full
+          # test/lint/install session; recap generation is a documentation task.
+          CODEX_ARGS=(exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -c project_doc_max_bytes=0)
           if [ -n "${VISUAL_RECAP_MODEL:-}" ]; then CODEX_ARGS+=(--model "$VISUAL_RECAP_MODEL"); fi
           case "${VISUAL_RECAP_REASONING:-}" in
             none|minimal|low|medium|high|xhigh)
@@ -916,6 +941,43 @@ jobs:
             if [ "$RECAP_AGENT" = "openai-compatible" ]; then RESULT=openai-compatible-repair-usage.json; fi
           fi
           if [ -f "$RESULT" ]; then $RECAP_CLI recap usage --plan-url "$PLAN_URL" --agent "$RECAP_AGENT" --result-file "$RESULT" --model "${VISUAL_RECAP_MODEL:-}" --app-url "$PLAN_RECAP_APP_URL" --token "$PLAN_RECAP_TOKEN" || true; fi
+
+      - name: Usage summary
+        if: always() && needs.gate.outputs.agent != ''
+        continue-on-error: true
+        env:
+          RECAP_AGENT: ${{ needs.gate.outputs.agent }}
+        run: |
+          # Numbers and model names only; no prompts, diffs or keys.
+          node -e '
+            const fs = require("fs"), e = process.env;
+            const read = (f) => { try { return fs.readFileSync(f, "utf8"); } catch { return ""; } };
+            const usage = (f) => read(f).split("\n").map((l) => { try { return JSON.parse(l); } catch { return null; } })
+              .filter((x) => x && x.type === "turn.completed" && x.usage).map((x) => x.usage);
+            const main = usage("codex-events.jsonl"), repair = usage("codex-repair-events.jsonl");
+            const all = main.concat(repair);
+            const sum = (k) => all.reduce((a, u) => a + (u[k] || 0), 0);
+            const runs = read("codex-invocations.txt").split("\n").filter(Boolean).length + repair.length;
+            const secs = e.RECAP_T0 ? Math.round(Date.now() / 1000 - Number(e.RECAP_T0)) : null;
+            const rows = [
+              ["Agent", e.RECAP_AGENT],
+              ["Model", process.env.VISUAL_RECAP_MODEL || "(default)"],
+              ["Reasoning effort", process.env.VISUAL_RECAP_REASONING || "(default)"],
+            ];
+            if (e.RECAP_AGENT === "codex") {
+              const input = sum("input_tokens"), cached = sum("cached_input_tokens");
+              rows.push(["Agent invocations (incl. retry/repair)", runs],
+                ["Input tokens", input], ["Cached input tokens", cached],
+                ["Uncached input tokens", input - cached], ["Output tokens", sum("output_tokens")],
+                ["Reasoning output tokens (reported separately from output)", sum("reasoning_output_tokens")],
+                ["Cost", "not reported by Codex; compute from your provider price sheet"]);
+            } else {
+              rows.push(["Token usage", "only collected for the codex backend"]);
+            }
+            if (secs !== null) rows.push(["Prompt-build to summary (s)", secs]);
+            const md = "### Visual recap usage\n\n| Metric | Value |\n|---|---|\n" + rows.map((r) => `| ${r[0]} | ${r[1]} |`).join("\n") + "\n";
+            fs.appendFileSync(e.GITHUB_STEP_SUMMARY, md);
+          '
 
       - name: Cache Playwright browsers
         if: steps.url.outputs.ok == 'true'
