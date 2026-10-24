@@ -1,0 +1,177 @@
+---
+title: "Redactor core: typed, fail-closed secret redaction"
+---
+
+## Outcome
+
+`internal/redactor` gains one pure function, `Redact(input []byte) (Result, error)`. It replaces AWS access key IDs, context-anchored AWS secret access keys, GitHub tokens and PEM/PGP private key blocks with per-call numbered labels such as `[AWS_ACCESS_KEY_1]`. If it cannot vouch for its output, it returns an error and no output. The package uses only the Go standard library, and the CLI, config, scanner, quarantine and streaming work stay out of scope. The full spec lives at `docs/features/redactor-core/spec.md`.
+
+Concrete example: a 2 MB log containing `AWS_KEY_AKIA<16 chars>`, the same key again later, and a truncated RSA private key block (a BEGIN line with no END). The result has `AWS_KEY_[AWS_ACCESS_KEY_1]` twice and `[PRIVATE_KEY_1]` from the BEGIN line to end of input, with `Counts = {AWS_ACCESS_KEY: 1, PRIVATE_KEY: 1}`.
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:** JWT, bearer and OAuth tokens; passwords and PII; unanchored AWS secret keys; base64, URL-encoded, compressed, split or obfuscated secrets; UTF-16/32 text (rejected); cross-call pseudonyms and label re-hydration; streaming; zeroising memory. The output reduces accidental disclosure of the covered formats. It is never described as "safe to share".
+
+</Callout>
+
+## Pipeline
+
+<Diagram id="pipeline-diagram" frame="show" caption="Every error path returns nil Output and nil Counts.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Guards</div>
+    <div class="diagram-node">Size cap 10 MiB</div>
+    <div class="diagram-node">NUL / UTF-16/32 BOM</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Detect (spans)</div>
+    <div class="diagram-node">Regex table: AWS id, AWS secret, GitHub</div>
+    <div class="diagram-node">PEM cursor scan</div>
+    <div class="diagram-node">Label-like text</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Transform</div>
+    <div class="diagram-node">Union merge + kind priority</div>
+    <div class="diagram-node">Per-call labels (sha256-keyed)</div>
+    <div class="diagram-node">Fresh output + emitted offsets</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Verify (looser than detect)</div>
+    <div class="diagram-node">Loose secret checks</div>
+    <div class="diagram-node">Labels only where emitted</div>
+  </div>
+  <div class="diagram-box errs">
+    <span class="diagram-pill">ErrInputTooLarge</span>
+    <span class="diagram-pill">ErrUnsupportedEncoding</span>
+    <span class="diagram-pill">ErrVerificationFailed: KIND</span>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.errs { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 8px; }
+```
+
+</Diagram>
+
+## API
+
+<AnnotatedCode
+  id="api-code"
+  filename="internal/redactor/redactor.go"
+  language="go"
+  code={"package redactor\n\nconst MaxInputSize = 10 << 20 // 10 MiB\n\ntype Kind string\n\nconst (\n\tKindAWSAccessKey Kind = \"AWS_ACCESS_KEY\"\n\tKindAWSSecretKey Kind = \"AWS_SECRET_KEY\"\n\tKindGitHubToken  Kind = \"GITHUB_TOKEN\"\n\tKindPrivateKey   Kind = \"PRIVATE_KEY\"\n\tKindLabelLike    Kind = \"LABEL_LIKE\"\n)\n\nvar (\n\tErrInputTooLarge       = errors.New(\"redactor: input exceeds maximum size\")\n\tErrUnsupportedEncoding = errors.New(\"redactor: unsupported encoding\")\n\tErrVerificationFailed  = errors.New(\"redactor: verification failed\")\n)\n\ntype Result struct {\n\tOutput []byte       // fresh copy; nil on error\n\tCounts map[Kind]int // distinct labels per kind; nil on error\n}\n\nfunc Redact(input []byte) (Result, error)"}
+  annotations={[
+    { lines: "3", label: "Cap", note: "Over the cap is an error. Output may grow to about 1.3x the input and is not capped by this constant." },
+    { lines: "12", label: "Not a secret", note: "Counts pre-existing label-shaped text that was neutralised to (KIND_N)." },
+    { lines: "15-19", label: "Constant sentinels", note: "No sizes, values or offsets in errors. The verification error is wrapped with the kind name only." },
+    { lines: "21-24", label: "Ownership", note: "Output never aliases input. Empty input gives an empty non-nil Output." }
+  ]}
+/>
+
+## Detectors
+
+<Table
+  id="detector-table"
+  columns={["Label", "Detection", "Notes"]}
+  rows={[
+    ["AWS_ACCESS_KEY", "(?:AKIA|ASIA)[A-Z0-9]{16}", "No \\b anchors: RE2 treats _ as a word char, so AWS_KEY_AKIA... would be missed. Over-redaction is safe."],
+    ["AWS_SECRET_KEY", "aws_secret_access_key-style name, optional quote, separator (= : => :=), optional quote, then [A-Za-z0-9/+]{40} and any trailing base64 chars", "Name is case-insensitive. Only the value is redacted; the name, separator and quotes are kept."],
+    ["GITHUB_TOKEN", "gh[pousr]_[A-Za-z0-9]{36,} | github_pat_[A-Za-z0-9_]{22,}", "No upper bound, so no tail fragment survives."],
+    ["PRIVATE_KEY", "-----BEGIN (TYPE ){0,4}PRIVATE KEY( BLOCK)?----- ... matching END", "Case-insensitive. RSA, EC, DSA, OPENSSH, ENCRYPTED, PKCS#8, PGP and empty type."]
+  ]}
+/>
+
+### PEM cursor scan
+
+A single forward cursor keeps the scan linear. It finds a BEGIN, then the next END. If the types match, the block is one span and the cursor jumps past it, so a nested BEGIN is skipped. If no END follows, or the types differ, the span runs to end of input and the scan stops. A second linear pass handles **orphaned END** markers, which come from logs truncated at the top. Each one is redacted from the end of the previous PEM span (or offset 0) through the END marker. The `Proc-Type:`/`DEK-Info:` headers and the body sit inside these spans.
+
+<Callout id="merge-callout" tone="decision">
+
+**Merge and labels.** Overlapping or touching spans are unioned to `[min start, max end)`. The merged kind is the highest priority constituent: `PRIVATE_KEY` > `GITHUB_TOKEN` > `AWS_SECRET_KEY` > `AWS_ACCESS_KEY` > `LABEL_LIKE`. The equality key is (kind, sha256 of the merged bytes). `N` follows only the order of first appearance by merged start offset per kind, never a hash, prefix, length or the AKIA/ASIA type. Labels are per call: the same label in two calls refers to different values.
+
+</Callout>
+
+## Verification (fail closed)
+
+Verification runs on the exact bytes to be returned and is deliberately looser than detection:
+
+<Table
+  id="verify-table"
+  columns={["Kind reported", "Loose check"]}
+  rows={[
+    ["AWS_ACCESS_KEY", "(?:AKIA|ASIA)[A-Z0-9]{16} anywhere"],
+    ["AWS_SECRET_KEY", "(?i)secret[_-]?access[_-]?key, up to 16 chars, then 40 base64 chars"],
+    ["GITHUB_TOKEN", "gh[pousr]_[A-Za-z0-9]{20,} or github_pat_ followed by a token char"],
+    ["PRIVATE_KEY", "(?i)-----(BEGIN|END) up to 64 chars PRIVATE KEY, or PRIVATE KEY( BLOCK)?----- anywhere"],
+    ["LABEL_LIKE", "Any label-grammar match not at an offset this call emitted"]
+  ]}
+/>
+
+<Callout id="verify-risk" tone="risk">
+
+**Accepted false-fails.** A truncated `ghp_` token of 20 to 35 chars, or `secret_access_key` text followed by a 40-char base64 run, makes the whole call fail. That is the fail-closed trade-off. The base64 `-----BEGIN` (`LS0tLS1CRUdJTi`) flag is left out because it would also reject inputs that only contain base64 certificates.
+
+</Callout>
+
+## Files
+
+<FileTree
+  id="files"
+  title="Files touched"
+  entries={[
+    { path: "internal/redactor/redactor.go", change: "added", note: "API, guards, pipeline, merge, labels, output build." },
+    { path: "internal/redactor/detect.go", change: "added", note: "Regex detector table and label-like regex." },
+    { path: "internal/redactor/pem.go", change: "added", note: "Linear PEM cursor scan and orphan END pass." },
+    { path: "internal/redactor/verify.go", change: "added", note: "Loose verification checks." },
+    { path: "internal/redactor/redactor_test.go", change: "modified", note: "Replaces placeholder; guards, detectors, merge, labels, race." },
+    { path: "internal/redactor/secrets_test.go", change: "added", note: "Runtime secret generators; no literal keys in repo." },
+    { path: "internal/redactor/fuzz_test.go", change: "added", note: "Detector-independent property fuzz test." },
+    { path: "internal/redactor/bench_test.go", change: "added", note: "10 MiB adversarial budget and allocation benchmark." },
+    { path: "docs/threat-model.md", change: "modified", note: "Redaction section: adversary model, assets, non-goals, accepted risks." },
+    { path: "docs/adr/0001-redactor-core-pseudonyms-and-fail-closed.md", change: "added", note: "Per-call labels, in-memory cap, verification pass." },
+    { path: "docs/features/redactor-core/spec.md", change: "added", note: "Approved spec." }
+  ]}
+/>
+
+## Implementation steps
+
+One PR on a feature branch such as `feat/redactor-core`. It is small enough that stacking isn't needed.
+
+<Checklist
+  id="steps"
+  items={[
+    { id: "s1", label: "1. API skeleton and guards", note: "Size cap (exact and +1), NUL and UTF-16/32 BOM rejection, empty input, fresh-copy output, nil Counts on error. Replace the placeholder test." },
+    { id: "s2", label: "2. Runtime secret generators", note: "Seeded generators for every kind. No literal secrets, so gitleaks stays green." },
+    { id: "s3", label: "3. Regex detector table", note: "AWS id (AWS_KEY_ prefix, back-to-back, key+x), AWS secret forms with quotes kept, GitHub at 36/255/256+, near-misses." },
+    { id: "s4", label: "4. PEM cursor scan", note: "All types, CRLF, lowercase, nested BEGIN, type mismatch to EOF, unterminated to EOF, orphan END, headers removed." },
+    { id: "s5", label: "5. Merge, labels, output", note: "Nested, partial, touching and identical spans with no surviving bytes; repeat equals same label; pre-existing [AWS_ACCESS_KEY_1] plus a real key gives one real label." },
+    { id: "s6", label: "6. Verification pass", note: "Each loose check fails closed; error names the kind only; regression for a GitHub token next to an AWS key; label sample up to N=10^6 matches no check." },
+    { id: "s7", label: "7. Fuzz, race, performance", note: "Property fuzz with embedded generated secrets and seeds; parallel -race test; 10 MiB adversarial test under 5 s; allocation benchmark under 10x input." },
+    { id: "s8", label: "8. Docs", note: "Threat-model redaction section, ADR 0001, and a follow-up note on the Sentinel naming in architecture.md." }
+  ]}
+/>
+
+## Future CLI constraints (recorded, not built)
+
+- Read through `io.LimitReader(r, MaxInputSize+1)` and never chunk the input.
+- Open regular files only, with safe symlink handling.
+- Write output only after `Redact` succeeds. Write `-o` via a temp file in the same directory, then rename.
+- Help text never says "safe to share".
+
+## Verification and definition of done
+
+- `task test`, `go test -race ./internal/redactor/...`, and `go test -fuzz=FuzzRedact -fuzztime=60s ./internal/redactor` pass.
+- `task verify` passes: fmt, golangci-lint, tests, gosec, govulncheck, gitleaks.
+- No new `go.mod` dependencies, and no literal secret material in the repo or PR.
+- The threat model and ADR 0001 are written.
+
+<Callout id="claims" tone="info">
+
+**Claims.** RE2 linear time is **Verified** (`go doc regexp`, go1.27.1). The `\b` semantics that include `_` are **Verified** (`go doc regexp/syntax` plus the security-reviewer reproduction). The UTF-16LE miss and the 156 ms timing for 500k matches are **Verified** by the security-reviewer on go1.27. The AWS and GitHub token formats and the extra AWS prefixes are **Assumed** from public format conventions; confirm them during implementation.
+
+</Callout>
