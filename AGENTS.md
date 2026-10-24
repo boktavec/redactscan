@@ -53,7 +53,7 @@ Read the relevant skill file before starting that kind of work. The files live i
 These MCP servers are configured for the user's local Claude Code (this repo has no project `.mcp.json`). Check that a server is connected before relying on it; tool names and availability can vary by client.
 
 - **`context7`** provides current third-party library documentation. Use it before using an unfamiliar library: inspect the version in `go.mod`, then consult current docs. Do not invent APIs. The repository and the threat model remain the authority for RedactScan requirements and decisions.
-- **`plan`** (hosted Agent-Native Plan MCP) is not used. `visual-plan` runs in local-files mode: plans are MDX under `plans/<slug>/`, checked with `npx @agent-native/core@latest plan local check` and viewed through a localhost bridge, so plan content is not uploaded. Do not call hosted Plan tools. Never commit `.plan-url` (a local token file). If a `plan` server is still registered in your client, remove it with `claude mcp remove plan`.
+- **`plan`** (hosted Agent-Native Plan MCP) is not used. `visual-plan` runs in local-files mode: plans are MDX under `plans/<slug>/`, checked with `npx @agent-native/core@latest plan local check` and viewed through a localhost bridge, so plan content is not uploaded. Do not call hosted Plan tools. Never commit `.plan-url` (a local token file).
 
 Keep MCP credentials out of the repository and do not paste them into issues, plans, logs, or PRs. If a server is unavailable, say which lookup could not be completed and continue with the work that does not depend on it.
 
