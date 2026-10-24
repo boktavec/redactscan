@@ -57,6 +57,12 @@ task verify
 
 Do not claim a task is complete unless `task verify` succeeds.
 
+## Planning and PR Recaps
+
+All planning must use the `visual-plan` skill.
+
+PRs marked ready for review get a visual recap from `.github/workflows/pr-visual-recap.yml` (draft PRs are skipped). Use `visual-recap` to preview one locally.
+
 ## External Libraries
 
 Before using unfamiliar external libraries:
