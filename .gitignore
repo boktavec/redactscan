@@ -30,3 +30,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Pi package installs
+.pi/npm/
+
+# visual-plan local bridge token
+.plan-url
