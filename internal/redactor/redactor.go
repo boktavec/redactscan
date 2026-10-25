@@ -12,7 +12,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"strconv"
 )
 
@@ -155,8 +154,19 @@ func appendNeutralised(dst, label []byte) []byte {
 	return dst
 }
 
+// VerificationError reports which kind failed verification. It matches
+// ErrVerificationFailed with errors.Is and carries no input data.
+type VerificationError struct{ Kind Kind }
+
+func (e *VerificationError) Error() string {
+	return ErrVerificationFailed.Error() + ": " + string(e.Kind)
+}
+
+// Is reports whether target is ErrVerificationFailed.
+func (e *VerificationError) Is(target error) bool { return target == ErrVerificationFailed }
+
 // verifyError reports the kind that failed verification, never a value or
 // offset.
 func verifyError(kind Kind) error {
-	return fmt.Errorf("%w: %s", ErrVerificationFailed, kind)
+	return &VerificationError{Kind: kind}
 }

@@ -92,3 +92,21 @@ func TestEmittedLabelsPassEveryCheckForLargeN(t *testing.T) {
 		}
 	}
 }
+
+func TestVerificationErrorCarriesKind(t *testing.T) {
+	err := verify([]byte(newSecretGen(41).ghClassic('p', 20)), nil)
+
+	var ve *VerificationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("errors.As failed for %v", err)
+	}
+	if ve.Kind != KindGitHubToken {
+		t.Errorf("Kind = %q, want %q", ve.Kind, KindGitHubToken)
+	}
+	if !errors.Is(err, ErrVerificationFailed) {
+		t.Errorf("errors.Is(err, ErrVerificationFailed) = false")
+	}
+	if want := ErrVerificationFailed.Error() + ": " + string(KindGitHubToken); err.Error() != want {
+		t.Errorf("error text = %q, want %q", err.Error(), want)
+	}
+}

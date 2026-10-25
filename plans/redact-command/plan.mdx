@@ -1,0 +1,154 @@
+---
+title: "redact command: file or stdin to stdout, fail closed"
+---
+
+## Outcome
+
+`redactscan redact [-summary] [FILE|-]` runs the existing redactor core over a file or stdin and writes the redacted text to stdout. If the redactor refuses (input over 10 MiB, unsupported encoding, verification failure), the command exits 1, writes nothing to stdout, and never echoes input. Story: [REDACT-2](http://localhost:8080/issue/REDACT-2). Full spec: `docs/features/redact-command/spec.md`.
+
+Concrete example: `cat app.log | redactscan redact -summary > shared.log`. If `app.log` holds two different AWS access key IDs, `shared.log` contains `[AWS_ACCESS_KEY_1]` and `[AWS_ACCESS_KEY_2]` and stderr shows `redactscan: redacted AWS_ACCESS_KEY=2`. If the log contains a truncated `ghp_` token, `shared.log` is empty, the exit code is 1 and stderr shows `redactscan: redaction refused: output could not be verified (kind: GITHUB_TOKEN)`.
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:** safe file opening (regular files only, no symlinks, FIFOs, devices) is [REDACT-10](http://localhost:8080/issue/REDACT-10); `-o` output files; streaming or multi-file input; config and profiles; `scan`; MCP; stdin TTY detection. Help, README and messages never call the output "safe to share".
+
+</Callout>
+
+## Flow
+
+<Diagram id="flow-diagram" frame="show" caption="stdout is written once, only after Redact succeeds. Every other path leaves stdout empty.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Parse</div>
+    <div class="diagram-node">subcommand redact</div>
+    <div class="diagram-node">FlagSet: -summary</div>
+    <div class="diagram-node">0 or 1 positional</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Read</div>
+    <div class="diagram-node">openInput (os.Open seam)</div>
+    <div class="diagram-node">LimitReader Max+1</div>
+    <div class="diagram-node">close on every path</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Redact</div>
+    <div class="diagram-node">redactor.Redact once</div>
+    <div class="diagram-node">errors.Is / errors.As</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Write</div>
+    <div class="diagram-node">one stdout write</div>
+    <div class="diagram-node">optional summary on stderr</div>
+  </div>
+  <div class="diagram-box codes">
+    <span class="diagram-pill">0 ok / help</span>
+    <span class="diagram-pill">1 refused</span>
+    <span class="diagram-pill">2 usage</span>
+    <span class="diagram-pill">3 I/O</span>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.codes { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 8px; }
+```
+
+</Diagram>
+
+## Files
+
+<FileTree
+  id="files-tree"
+  entries={[
+    { path: "cmd/redactscan/main.go", change: "modified", note: "One line: os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))." },
+    { path: "internal/cli/cli.go", change: "added", note: "Run, subcommand dispatch, usage text, help and usage errors." },
+    { path: "internal/cli/redact.go", change: "added", note: "redact flow, openInput seam, error-to-exit-code mapping, summary." },
+    { path: "internal/cli/cli_test.go", change: "added", note: "Table-driven tests through Run with buffers and temp files." },
+    { path: "internal/redactor/redactor.go", change: "modified", note: "VerificationError type; verifyError returns it. Error text unchanged." },
+    { path: "docs/threat-model.md", change: "modified", note: "New CLI section: exit codes, stderr rules, openInput gap." },
+    { path: "README.md", change: "modified", note: "Usage section; drop the 'safely redacting' wording." }
+  ]}
+/>
+
+## Messages and exit codes
+
+<Table
+  id="messages-table"
+  columns={["Case", "Exit", "stderr (fixed text)"]}
+  rows={[
+    ["Success", "0", "empty, or the -summary line"],
+    ["-h / -help / --help", "0", "empty (usage goes to stdout)"],
+    ["Input over 10 MiB", "1", "redactscan: redaction refused: input exceeds 10 MiB limit"],
+    ["NUL byte or UTF-16/32 BOM", "1", "redactscan: redaction refused: unsupported encoding (NUL byte or UTF-16/32)"],
+    ["Verification failed", "1", "redactscan: redaction refused: output could not be verified (kind: KIND or unknown)"],
+    ["Other redactor error", "1", "redactscan: redaction refused: internal error"],
+    ["No/unknown subcommand, unknown flag, 2+ arguments", "2", "one-line reason, then usage"],
+    ["Open failed", "3", "redactscan: cannot open \"PATH\": not found | permission denied | cannot open"],
+    ["Read failed (includes a directory)", "3", "redactscan: cannot read \"PATH\" (or stdin): read failed"],
+    ["stdout write failed or short", "3", "redactscan: cannot write output: write failed"]
+  ]}
+/>
+
+<Callout id="messages-decision" tone="decision">
+
+**The CLI owns every message.** It never prints `err.Error()` from the redactor or the OS. Messages are fixed text plus a kind constant or the user's own path quoted with `strconv.Quote`, so the "never echo input" rule does not depend on library error formatting. Exit 1 stays a clean "refused" signal; I/O problems get their own code 3.
+
+</Callout>
+
+## Typed verification error
+
+<AnnotatedCode
+  id="verification-error-code"
+  filename="internal/redactor/redactor.go"
+  language="go"
+  code={"// VerificationError reports which kind failed verification. It matches\n// ErrVerificationFailed with errors.Is and carries no input data.\ntype VerificationError struct{ Kind Kind }\n\nfunc (e *VerificationError) Error() string {\n\treturn ErrVerificationFailed.Error() + \": \" + string(e.Kind)\n}\n\nfunc (e *VerificationError) Is(target error) bool {\n\treturn target == ErrVerificationFailed\n}\n\nfunc verifyError(kind Kind) error {\n\treturn &VerificationError{Kind: kind}\n}"}
+  annotations={[
+    { lines: "3", label: "Kind only", note: "No value, offset or input bytes." },
+    { lines: "5-7", label: "Same text", note: "Identical to today's wrapped error, so existing tests keep passing." },
+    { lines: "9-11", label: "Compatibility", note: "errors.Is(err, ErrVerificationFailed) still holds for every caller." }
+  ]}
+/>
+
+The CLI uses `errors.As` to read the kind. If only `errors.Is(err, ErrVerificationFailed)` matches, it prints `kind: unknown` and still exits 1.
+
+## The openInput seam
+
+<Callout id="seam-risk" tone="risk">
+
+**Known gap until REDACT-10.** `openInput(path)` is the only function that touches the filesystem, and in this story it is plain `os.Open`. A symlink is followed, a FIFO with no writer blocks, a device is read, and a directory fails on read (exit 3). REDACT-10 swaps the body for `safefs.OpenRegular` and extends the exit-3 mapping; nothing else changes. The gap is written into the threat model CLI section and the PR.
+
+</Callout>
+
+## Stdlib behavior relied on
+
+- **Verified** (`go doc flag`, Go 1.27.1): one or two dashes are equivalent, so `--summary` works; parsing stops before the first non-flag argument (`-` is a non-flag), so `redact app.log -summary` is two positionals and exits 2; `flag.ErrHelp` is returned for `-h`/`-help`; `ContinueOnError` returns errors instead of exiting.
+- **Assumed**: `os.Open` on a directory succeeds on macOS and Linux and the first read fails. The directory test asserts exit 3 only, so either path passes.
+- **Assumed**: a write to a closed stdout pipe raises SIGPIPE and the Go runtime exits the process; either way no raw input is written.
+
+## Implementation steps
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "1. Typed VerificationError in internal/redactor", note: "Tests: errors.As yields the kind; errors.Is still true; Error() text unchanged; existing tests pass." },
+    { id: "step-2", label: "2. internal/cli skeleton: Run, dispatch, usage, help", note: "Tests: no args, unknown subcommand, -h at both levels, unknown flag, two positionals, flag after FILE, help wording (no 'safe to share' or 'safely')." },
+    { id: "step-3", label: "3. redact happy path: openInput, bounded read, Redact, single write", note: "Depends on 2. Tests: temp file, '-' and no-arg stdin, empty input, FILE given while stdin has data." },
+    { id: "step-4", label: "4. Refusals and I/O mapping", note: "Depends on 1 and 3. Tests: exactly 10 MiB ok, +1 refused, NUL, UTF-16 BOM, verification failure names GITHUB_TOKEN, missing file, directory, unreadable file (skip as root), failing and short writers, mid-read error. Every case: empty stdout, no input bytes in stderr." },
+    { id: "step-5", label: "5. -summary", note: "Depends on 3. Tests: sorted kinds, 'no covered secret formats found', label-like suffix, --summary, quiet without the flag." },
+    { id: "step-6", label: "6. main.go one-liner", note: "Manual go run check." },
+    { id: "step-7", label: "7. Docs: threat-model CLI section, README usage", note: "Names REDACT-10 as the fix for the openInput gap." }
+  ]}
+/>
+
+About 130 lines of code, 15 in `redactor`, 250 of tests: one PR, under the 500-line split point.
+
+## Verification
+
+- `task test` after each step; `task verify` (fmt, lint, test, gosec, govulncheck, gitleaks) before the PR is marked ready.
+- Break-the-guard check: temporarily write stdout before `Redact` succeeds, and print `err.Error()` on refusal; confirm the tests fail; revert.
+- Manual smoke: `go run ./cmd/redactscan redact <tempfile>`; `cat <tempfile> | go run ./cmd/redactscan redact -summary`; a missing file gives `echo $?` 3; a file with a NUL byte gives 1 and empty stdout.
+- Reviews: staff reviewer and security reviewer (redaction, scanned-content handling, file paths).
