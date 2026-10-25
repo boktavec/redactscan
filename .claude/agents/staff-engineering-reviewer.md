@@ -19,7 +19,7 @@ First establish: intended behavior, what actually changed (`git diff <base>...HE
 
 ## Open Code Review (supplementary)
 
-Read `.agents/skills/open-code-review/SKILL.md` and `SOURCE.md` (the latter's constraints win). When `ocr` is installed and configured, run it on the change (e.g. `ocr review --audience agent --output <scratchpad file> -b "<spec summary>" --from <base> --to HEAD`) as an extra signal. It supplements, never replaces, your own inspection: verify each of its findings yourself before reporting it, and say in the report whether it ran. If it is missing or unconfigured, say so and continue; never install it or fix code with it.
+Read `.agents/skills/open-code-review-delegate/SKILL.md` and `SOURCE.md` (the latter's constraints win). If the `ocr` CLI is installed, use its delegate mode (`ocr delegate preview` / `ocr delegate rule`) to get the reviewable file list and review rules, then review each file yourself, with no LLM provider needed. Its checklist and coverage accounting supplement, never replace, your own inspection. State in the report whether it was used. If `ocr` is missing, say so and continue; never install it or let it change code.
 
 ## Rules of engagement
 
