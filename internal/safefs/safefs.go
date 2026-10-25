@@ -1,12 +1,14 @@
-// Package safefs is the filesystem trust boundary for input files: it opens
-// only regular files reached without following a symlink, and refuses
-// everything else with a fixed error. Error text never contains the path,
-// file contents or OS error text.
+// Package safefs is the filesystem trust boundary for input and output files.
+// OpenRegular opens only regular files reached without following a symlink.
+// WriteSibling creates a new file beside an input through a pinned directory,
+// without clobbering unless asked. Both refuse everything unsafe with a fixed
+// error. Error text never contains the path, file contents or OS error text.
 package safefs
 
 import (
 	"errors"
 	"io/fs"
+	"os"
 )
 
 var (
@@ -14,6 +16,8 @@ var (
 	ErrNotRegular          = errors.New("safefs: not a regular file")
 	ErrChanged             = errors.New("safefs: file changed during open")
 	ErrUnsupportedPlatform = errors.New("safefs: unsupported platform")
+	ErrInvalidName         = errors.New("safefs: invalid output name")
+	ErrTempNames           = errors.New("safefs: no free temporary name")
 )
 
 // FileType names the kind of non-regular file that was refused.
@@ -54,18 +58,26 @@ func fileType(m fs.FileMode) FileType {
 // opError has fixed text per step and unwraps to the bare syscall.Errno
 // (never the *fs.PathError, which carries the path).
 type opError struct {
-	op  string // "lstat", "open", "fstat", "set blocking"
+	op  string // "lstat", "open", "fstat", "set blocking", "link", "rename", ...
 	err error
 }
 
 func (e *opError) Error() string { return "safefs: " + e.op + " failed" }
 func (e *opError) Unwrap() error { return e.err }
 
-// newOpError drops the *fs.PathError wrapper so the path cannot leak.
+// newOpError drops the *fs.PathError, *os.LinkError and *os.SyscallError
+// wrappers so a path cannot leak.
 func newOpError(op string, err error) error {
 	var pe *fs.PathError
-	if errors.As(err, &pe) {
+	var le *os.LinkError
+	var se *os.SyscallError
+	switch {
+	case errors.As(err, &pe):
 		err = pe.Err
+	case errors.As(err, &le):
+		err = le.Err
+	case errors.As(err, &se):
+		err = se.Err
 	}
 	return &opError{op: op, err: err}
 }

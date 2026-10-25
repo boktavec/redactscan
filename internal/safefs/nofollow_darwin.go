@@ -24,6 +24,10 @@ func openNoFollow(path string, flags int) (*os.File, error) {
 	return os.OpenFile(path, flags&^syscall.O_NOFOLLOW|oNofollowAny, 0) // #nosec G304 -- path is validated by Lstat, O_NOFOLLOW_ANY and the Fstat identity check
 }
 
+// fdDir holds one entry per open descriptor on macOS; WriteSibling opens its
+// root through it. If it is missing, the root open fails closed.
+const fdDir = "/dev/fd"
+
 // normalizePath rewrites a leading /tmp, /var or /etc to /private/... when
 // that link is verified at run time; any other path is returned unchanged.
 func normalizePath(path string) string { return systemPath(path, trustedSystemLink) }

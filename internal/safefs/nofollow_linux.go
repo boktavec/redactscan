@@ -7,6 +7,10 @@ import (
 	"syscall"
 )
 
+// fdDir holds one entry per open descriptor on Linux; WriteSibling opens its
+// root through it. If it is missing, the root open fails closed.
+const fdDir = "/proc/self/fd"
+
 // normalizePath is the identity on Linux; there are no system links to allow.
 func normalizePath(path string) string { return path }
 
@@ -21,13 +25,12 @@ func openNoFollow(path string, flags int) (*os.File, error) {
 			parts = append(parts, p)
 		}
 	}
-	if len(parts) == 0 {
-		return nil, syscall.ENOENT
-	}
-
 	start := "."
 	if strings.HasPrefix(path, "/") {
 		start = "/"
+	}
+	if len(parts) == 0 { // "." or "/": the start directory itself
+		return os.OpenFile(start, flags, 0) // #nosec G304 -- start is the constant "." or "/"
 	}
 	dirfd, err := retryEINTR(func() (int, error) {
 		return syscall.Open(start, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
