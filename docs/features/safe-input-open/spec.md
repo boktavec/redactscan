@@ -1,6 +1,6 @@
 # Safe input opening: spec
 
-Status: approved design; PR 1 implemented, PR 2 pending.
+Status: approved design; PR 1 and PR 2 implemented.
 Story: [REDACT-10](http://localhost:8080/issue/REDACT-10) "Safe input file opening". Depends on REDACT-2 (merged: `redactscan redact`, the `openInput` seam in `internal/cli/redact.go`).
 Branch: `feat/redact-10-safe-input-open`. Delivered as two stacked PRs (PR 1, PR 2; see section 9).
 Packages: new `internal/safefs`; small change to `internal/cli`; `Taskfile.yml`. Go standard library only, no new dependency.
@@ -62,7 +62,7 @@ internal/safefs/
   nofollow_darwin.go  PR 2: O_NOFOLLOW_ANY open + system-prefix rule
   nofollow_linux.go   PR 2: openat component walk
   safefs_test.go      //go:build darwin || linux
-  nofollow_darwin_test.go, nofollow_linux_test.go   PR 2
+  nofollow_darwin_test.go, fullpath_test.go   PR 2
 internal/cli/redact.go   openInput -> safefs.OpenRegular; openReason extended
 ```
 
@@ -153,12 +153,13 @@ var afterLstat = func() {}
 const oNofollowAny = 0x20000000
 
 func openNoFollow(path string, flags int) (*os.File, error) {
-    return os.OpenFile(systemPath(path, trustedSystemLink), flags|oNofollowAny, 0)
+    return os.OpenFile(path, flags&^syscall.O_NOFOLLOW|oNofollowAny, 0)
 }
+// OpenRegular calls normalizePath(path) = systemPath(path, trustedSystemLink) first.
 ```
 
 - **Verified**: `O_NOFOLLOW_ANY` is `0x20000000` in the macOS SDK `sys/fcntl.h` (line 158, "no symlinks allowed in path") and in `golang.org/x/sys/unix` v0.47.0 `zerrors_darwin_arm64.go`. Go's `syscall` does not export it, so `safefs` defines it (no `x/sys` dependency).
-- **Assumed** (asserted by FR11/FR12 tests): the refusal errno is `ELOOP`; a relative path is resolved from the cwd without re-checking the cwd; Go's minimum supported macOS includes `O_NOFOLLOW_ANY` (macOS 11+).
+- **Assumed** (asserted by FR11/FR12 tests): the refusal errno is `ELOOP`; a relative path is resolved from the cwd without re-checking the cwd; Go's minimum supported macOS includes `O_NOFOLLOW_ANY` (macOS 11+; older kernels not verified). **Verified**: passing `O_NOFOLLOW` together with `O_NOFOLLOW_ANY` fails with `EINVAL`, so the open clears `O_NOFOLLOW`.
 - `os.Lstat` in step 1 is also given `systemPath(path)`, so `Lstat` and `open` see the same path.
 
 **macOS system-link rule.** `/tmp`, `/var` and `/etc` are symlinks to `private/tmp`, `private/var`, `private/etc`, and `$TMPDIR` / `t.TempDir()` live under `/var/folders`. `systemPath(path, check)`:
@@ -177,7 +178,7 @@ dirfd := syscall.Open(start, O_RDONLY|O_DIRECTORY|O_CLOEXEC, 0)
 parts := split path on "/", drop "" and "."      (".." is kept)
 for each part except the last:
     next := syscall.Openat(dirfd, part, O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC, 0)
-    close(dirfd); dirfd = next            ELOOP -> ErrSymlink; other -> opError{"open"}
+    close(dirfd); dirfd = next            ELOOP, or ENOTDIR + Lstat symlink -> ErrSymlink; other -> opError{"open"}
 fd := syscall.Openat(dirfd, last, flags|O_CLOEXEC, 0); close(dirfd)
 return os.NewFile(uintptr(fd), path)
 ```
@@ -186,7 +187,8 @@ return os.NewFile(uintptr(fd), path)
 - `openat2(RESOLVE_NO_SYMLINKS)` is not used: it needs `golang.org/x/sys` or hand-written per-arch syscall numbers.
 - `".."` is opened like any component; `..` is never a symlink, and the component before it was already checked, so `link/../x` is refused at `link`.
 - Directories need read permission to be opened `O_RDONLY`; a search-only (`--x`) directory fails with permission denied. Accepted (fail closed).
-- **Assumed** (asserted by FR11 tests, run in a Linux container): a symlinked directory opened with `O_DIRECTORY|O_NOFOLLOW` fails with `ELOOP`. If Linux returns `ENOTDIR` instead, the result is a generic `opError{"open"}` (still refused, message `cannot open`); the implementer then classifies it with an `Fstatat(dirfd, part, AT_SYMLINK_NOFOLLOW)` probe so FR11 reports `ErrSymlink`.
+- **Verified** (golang:1.27 container): a symlinked directory opened with `O_DIRECTORY|O_NOFOLLOW` fails with `ENOTDIR`, not `ELOOP`. The walk classifies it with `syscall.Lstat` of the typed prefix (`Fstatat` is not exported on every Linux architecture) so FR11 reports `ErrSymlink`; a race can only change which refusal is reported. The raw `Open`/`Openat` calls retry on `EINTR`.
+- **Accepted**: the pre-open `os.Lstat` resolves symlinked parents, so metadata traversal (autofs, NFS, FUSE) can occur before the refusal, and a dangling symlinked parent may report `cannot open`.
 - Every intermediate descriptor is closed on every path (FR7 covers the walk).
 - `os.NewFile` with an `O_NONBLOCK` descriptor follows the same `newFile` logic as 3.3, so step 7 still clears it.
 - No Linux special case for `/proc`: `/proc/self` is a symlink, so `/proc/self/...` is refused.
@@ -214,7 +216,7 @@ return os.NewFile(uintptr(fd), path)
 
 - New internal package API (3.2). No persisted data, no migrations, no config.
 - CLI contract: exit codes unchanged; new stderr reasons; inputs that previously worked through a symlink are refused (intended). Directory errors move from "cannot read" to "cannot open".
-- `Taskfile.yml`: new `cross` task, run by `verify`: `GOOS=windows go build ./...`, `GOOS=linux go vet ./...`, `GOOS=freebsd go vet ./...` (catches build errors in files that never compile on the developer's macOS).
+- `Taskfile.yml`: new `cross` task, run by `verify`: `GOOS=windows go vet ./...`, `GOOS=linux go vet ./...` (also `GOARCH=amd64`, `arm64` and `386`), `GOOS=freebsd go vet ./...` (catches build errors in files that never compile on the developer's macOS).
 
 ## 5. Engineering decisions and rationale
 
@@ -274,7 +276,7 @@ Two stacked PRs. PR 2 branches from PR 1. Estimated size: PR 1 about 450 changed
 
 **PR 2: full-path protection**
 
-6. **Linux walk.** `nofollow_linux.go` per 3.4; move PR 1's `openNoFollow` out of `open_unix.go`. Depends on PR 1. Tests (`nofollow_linux_test.go`): FR11, FR12, `..` handling, fd leak on walk failures.
+6. **Linux walk.** `nofollow_linux.go` per 3.4; move PR 1's `openNoFollow` out of `open_unix.go`. Depends on PR 1. Tests (`fullpath_test.go`): FR11, FR12, `..` handling, fd leak on walk failures.
 7. **macOS `O_NOFOLLOW_ANY` and system-link rule.** `nofollow_darwin.go`. Depends on PR 1. Tests (`nofollow_darwin_test.go`): FR11-FR14, including raw `t.TempDir()` and `/tmp` success and the injected-check unit table.
 8. **CLI help and tests.** PR 2 help sentence; CLI test for a symlinked parent directory (exit 3, `symlink refused`). Depends on 6-7.
 9. **Docs and ADR.** `docs/threat-model.md`: remove the temporary parent-directory risk; record the macOS allowlist, the relative-path/cwd rule, Unix-only support, and the accepted risks in section 6. `docs/adr/0002-safe-input-open.md`. `docs/features/redact-command/spec.md` is left as historical. Depends on 6-8.

@@ -18,4 +18,4 @@ Exit codes: 0 success, 1 redaction refused, 2 usage error, 3 I/O error.
 go run ./cmd/redactscan redact -summary app.log > app.redacted.log
 ```
 
-Known gap: FILE is opened with a plain `os.Open`, so symlinks are followed and FIFOs or devices are not rejected. Safe file opening is tracked in REDACT-10.
+FILE must be a regular file reached without symlinks: a symlink in any part of the path, a FIFO, a device, a socket or a directory is refused with exit 3. On macOS the system links `/tmp`, `/var` and `/etc` are allowed.

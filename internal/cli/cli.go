@@ -26,7 +26,8 @@ access keys, AWS secret keys, GitHub tokens, PEM private keys. Other formats
 pass through unchanged. Pre-existing label-like text such as [GITHUB_TOKEN_1]
 is rewritten with parentheses. Input is limited to 10 MiB. With no FILE on a
 terminal the command waits for input until end of file, like cat. FILE must be
-a regular file; a symlink is refused.
+a regular file reached without symlinks (on macOS the system links /tmp, /var
+and /etc are allowed).
 
 Options:
   -summary  write a one-line count of replaced kinds to stderr

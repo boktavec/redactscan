@@ -273,6 +273,22 @@ func TestRedactIOErrors(t *testing.T) {
 		got := run([]string{"redact", link}, strings.NewReader(""))
 		assertFailure(t, got, 3, `redactscan: cannot open "`+link+`": symlink refused`+"\n", marker, awsKey(11))
 	})
+	t.Run("symlinked parent directory", func(t *testing.T) {
+		real := filepath.Join(dir, "real")
+		if err := os.Mkdir(real, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(real, "app.log"), []byte(marker+" "+awsKey(12)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		logs := filepath.Join(dir, "logs")
+		if err := os.Symlink(real, logs); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(logs, "app.log")
+		got := run([]string{"redact", path}, strings.NewReader(""))
+		assertFailure(t, got, 3, `redactscan: cannot open "`+path+`": symlink refused`+"\n", marker, awsKey(12))
+	})
 	t.Run("device", func(t *testing.T) {
 		got := run([]string{"redact", os.DevNull}, strings.NewReader(""))
 		assertFailure(t, got, 3, `redactscan: cannot open "`+os.DevNull+`": not a regular file (device)`+"\n")

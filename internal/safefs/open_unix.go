@@ -9,9 +9,10 @@ import (
 )
 
 // OpenRegular opens path read-only. It returns a blocking *os.File only when
-// path names a regular file whose final component is not a symlink. The
-// caller closes the file.
+// path names a regular file reached without following a symlink in any
+// component (see openNoFollow for the per-OS rule). The caller closes the file.
 func OpenRegular(path string) (*os.File, error) {
+	path = normalizePath(path)
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, newOpError("lstat", err)
@@ -55,10 +56,6 @@ func OpenRegular(path string) (*os.File, error) {
 		return nil, newOpError("set blocking", err)
 	}
 	return f, nil
-}
-
-func openNoFollow(path string, flags int) (*os.File, error) {
-	return os.OpenFile(path, flags, 0) // #nosec G304 -- path is validated by Lstat, O_NOFOLLOW and the Fstat identity check
 }
 
 func setBlocking(f *os.File) error {
