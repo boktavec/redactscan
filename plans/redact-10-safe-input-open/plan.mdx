@@ -1,0 +1,175 @@
+---
+title: "Safe input opening: regular files only, no symlinks, no hangs"
+---
+
+## Outcome
+
+`redactscan redact FILE` opens FILE only when it is a regular file reached without any symlink, and refuses everything else with a fixed message and exit 3, before reading a byte. A symlink, a symlinked directory in the path, a file swapped during the open, a FIFO, a device, a socket or a directory can no longer redirect or hang the tool. Story: [REDACT-10](http://localhost:8080/issue/REDACT-10). Full spec: `docs/features/safe-input-open/spec.md`.
+
+Concrete example: a cloned repo contains `logs/app.log`, where `logs` is a symlink to `~/.aws`. `redactscan redact logs/app.log` prints `redactscan: cannot open "logs/app.log": symlink refused`, exits 3 and writes nothing to stdout. `mkfifo pipe; redactscan redact pipe` returns at once with `not a regular file (fifo)` instead of hanging. On macOS, `redactscan redact /tmp/app.log` still works.
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:** stdin checks (a pipe on stdin is normal use); Windows (other platforms refuse with `unsupported platform`); `os.Root` confinement or an allow-symlinks flag; hard-link detection; re-checking the current directory for relative paths; `-o` output; directory scanning; quarantine.
+
+</Callout>
+
+## Delivery: two stacked PRs
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size"]}
+  rows={[
+    ["PR 1", "internal/safefs with final-component protection (Lstat, O_NOFOLLOW, post-open Fstat identity check), file-type refusal, O_NONBLOCK open then blocking restored, fixed errors, unsupported-platform stub, CLI wiring, task cross in verify, threat-model section", "about 450 lines incl. tests"],
+    ["PR 2", "Full-path protection: O_NOFOLLOW_ANY on macOS, openat component walk on Linux, run-time-checked macOS allowlist for /tmp, /var, /etc; threat-model update; ADR 0002", "about 250 lines plus docs"]
+  ]}
+/>
+
+## How OpenRegular decides
+
+<Diagram id="flow-diagram" frame="show" caption="Every refusal closes any open descriptor. Nothing is read until all checks pass.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">1. Before open</div>
+    <div class="diagram-node">Lstat(path)</div>
+    <div class="diagram-node">symlink: ErrSymlink</div>
+    <div class="diagram-node">not regular: NotRegularError(type)</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">2. Open</div>
+    <div class="diagram-node">afterLstat hook (tests only)</div>
+    <div class="diagram-node">O_RDONLY O_NOFOLLOW O_NONBLOCK O_NOCTTY</div>
+    <div class="diagram-node">PR 2: no symlink in any part</div>
+    <div class="diagram-node">ELOOP: ErrSymlink</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">3. After open</div>
+    <div class="diagram-node">f.Stat (Fstat)</div>
+    <div class="diagram-node">not SameFile: ErrChanged</div>
+    <div class="diagram-node">not regular: NotRegularError</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">4. Hand back</div>
+    <div class="diagram-node">clear O_NONBLOCK via SyscallConn</div>
+    <div class="diagram-node">return blocking *os.File</div>
+  </div>
+  <div class="diagram-box platforms">
+    <span class="diagram-pill">macOS: O_NOFOLLOW_ANY + /tmp /var /etc rule</span>
+    <span class="diagram-pill">Linux: openat walk, O_DIRECTORY|O_NOFOLLOW</span>
+    <span class="diagram-pill">other OS: ErrUnsupportedPlatform</span>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.platforms { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 8px; }
+```
+
+</Diagram>
+
+<AnnotatedCode
+  id="open-unix-code"
+  filename="internal/safefs/open_unix.go"
+  language="go"
+  code={"//go:build darwin || linux\n\nfunc OpenRegular(path string) (*os.File, error) {\n\tfi, err := os.Lstat(path)\n\tif err != nil {\n\t\treturn nil, newOpError(\"lstat\", err)\n\t}\n\tif err := checkType(fi); err != nil { // ErrSymlink or NotRegularError\n\t\treturn nil, err\n\t}\n\tafterLstat()\n\tf, err := openNoFollow(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY)\n\tif errors.Is(err, syscall.ELOOP) {\n\t\treturn nil, ErrSymlink\n\t} else if err != nil {\n\t\treturn nil, newOpError(\"open\", err)\n\t}\n\tif err := verifyOpened(f, fi); err != nil { // Stat, SameFile, IsRegular\n\t\t_ = f.Close()\n\t\treturn nil, err\n\t}\n\tif err := setBlocking(f); err != nil { // SyscallConn().Control + SetNonblock(false)\n\t\t_ = f.Close()\n\t\treturn nil, newOpError(\"set blocking\", err)\n\t}\n\treturn f, nil\n}"}
+  annotations={[
+    { lines: "4-10", label: "Lstat first", note: "Symlinks and non-regular types are refused before any descriptor exists." },
+    { lines: "11", label: "Test hook", note: "Unexported no-op; same-package tests swap the file here." },
+    { lines: "12", label: "openNoFollow", note: "PR 1: os.OpenFile. PR 2: O_NOFOLLOW_ANY on macOS, openat walk on Linux." },
+    { lines: "19-22", label: "Identity", note: "os.SameFile before IsRegular, so every swap reports ErrChanged." },
+    { lines: "23-26", label: "Blocking restored", note: "Go never clears O_NONBLOCK it was given (Verified in os/file_unix.go)." }
+  ]}
+/>
+
+## Errors and messages
+
+<Table
+  id="messages-table"
+  columns={["Case", "safefs error", "CLI stderr (exit 3)"]}
+  rows={[
+    ["Symlink (final part, or any part in PR 2)", "ErrSymlink", "cannot open \"P\": symlink refused"],
+    ["Directory, FIFO, device, socket, other", "*NotRegularError{Type} (Is ErrNotRegular)", "cannot open \"P\": not a regular file (directory | fifo | device | socket | irregular)"],
+    ["Swapped after Lstat", "ErrChanged", "cannot open \"P\": file changed during open"],
+    ["Not macOS or Linux", "ErrUnsupportedPlatform", "cannot open \"P\": unsupported platform"],
+    ["Missing file", "opError unwrapping ENOENT", "cannot open \"P\": not found"],
+    ["Unreadable file", "opError unwrapping EACCES", "cannot open \"P\": permission denied"],
+    ["Anything else", "opError", "cannot open \"P\": cannot open"]
+  ]}
+/>
+
+<Callout id="errors-decision" tone="decision">
+
+**Errors carry no path, contents or OS text.** `opError.Error()` is a fixed `safefs: <step> failed` and unwraps to the bare `syscall.Errno`, never the `*fs.PathError`, so `errors.Is(fs.ErrNotExist)` still works. The CLI checks reasons in the order shown and still never prints `err.Error()`. Exit codes are unchanged from REDACT-2.
+
+</Callout>
+
+## Full-path protection and macOS system links (PR 2)
+
+Only the parts of the path the user typed are checked. A relative path starts at the current directory, which is not checked again, so running `redact logs/app.log` from a directory under `/tmp` works.
+
+- **macOS:** `os.OpenFile` with `O_NOFOLLOW_ANY` (`0x20000000`). **Verified** in the macOS SDK `sys/fcntl.h` and `golang.org/x/sys/unix` v0.47.0, and defined locally because `syscall` does not export it. **Assumed** and covered by tests: the refusal errno is `ELOOP`, and the current directory is not checked again.
+- **macOS allowlist:** a path starting with `/tmp/`, `/var/` or `/etc/` is rewritten to `/private/...` only when, at run time, that entry in `/` is a symlink owned by root whose target is exactly `private/<name>`. Otherwise the path is left alone and refused. The rest of the path is still checked strictly. This keeps `$TMPDIR` and `t.TempDir()` paths under `/var/folders` working.
+- **Linux:** open `/` or `.`, then `syscall.Openat` each directory with `O_DIRECTORY|O_NOFOLLOW`, then the file. This uses only the standard library: `openat2` would need `x/sys`. **Assumed** and covered by tests: a symlinked directory fails with `ELOOP`. If Linux returns `ENOTDIR` instead, the open is still refused, and an `Fstatat` check makes the error report the symlink. `/proc/self/...` is refused because `/proc/self` is a symlink.
+
+## Files
+
+<FileTree
+  id="files-tree"
+  entries={[
+    { path: "internal/safefs/safefs.go", change: "added", note: "PR 1. Errors, FileType, NotRegularError, opError, afterLstat hook." },
+    { path: "internal/safefs/open_unix.go", change: "added", note: "PR 1. darwin || linux OpenRegular (3.3 of the spec)." },
+    { path: "internal/safefs/open_other.go", change: "added", note: "PR 1. !darwin && !linux stub returning ErrUnsupportedPlatform." },
+    { path: "internal/safefs/safefs_test.go", change: "added", note: "PR 1. Real temp files, symlinks, FIFOs, socket, /dev/null, swaps, F_GETFL, fd leak counts, error text." },
+    { path: "internal/safefs/nofollow_darwin.go", change: "added", note: "PR 2. O_NOFOLLOW_ANY and the /tmp /var /etc rule." },
+    { path: "internal/safefs/nofollow_linux.go", change: "added", note: "PR 2. openat component walk." },
+    { path: "internal/cli/redact.go", change: "modified", note: "PR 1. openInput calls safefs.OpenRegular; openReason extended; help sentence." },
+    { path: "internal/cli/cli_test.go", change: "modified", note: "PR 1 and 2. Refusal cases; directory now fails at open." },
+    { path: "Taskfile.yml", change: "modified", note: "PR 1. task cross (GOOS=windows build, linux and freebsd vet) run by verify." },
+    { path: "docs/threat-model.md", change: "modified", note: "PR 1 adds the safefs section; PR 2 removes the parent-directory risk and records the allowlist." },
+    { path: "docs/adr/0002-safe-input-open.md", change: "added", note: "PR 2. safefs as the filesystem trust boundary." }
+  ]}
+/>
+
+## Accepted risks
+
+<Callout id="risks-callout" tone="risk">
+
+- **Between the two PRs:** symlinked parent directories are still followed until PR 2 lands. The threat model says so.
+- **Hard links:** a hard link to a sensitive file is a regular file, so it opens. Creating one already needs access to the target, on the same filesystem.
+- **Changes after open:** the file's contents can change after it is opened. The 10 MiB read limit still applies.
+- **Network and FUSE filesystems:** a regular file there can block on read.
+- **Search-only directories on Linux:** a directory with execute but no read permission is refused (fails closed).
+- **Platforms:** macOS and Linux only.
+
+</Callout>
+
+## Implementation steps
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "1. safefs errors and types, other-OS stub (PR 1)", note: "Tests: NotRegularError matches ErrNotRegular; opError has fixed text and errors.Is(fs.ErrNotExist) works through it; fileType table." },
+    { id: "step-2", label: "2. OpenRegular for darwin and linux (PR 1)", note: "Depends on 1. Tests FR1-FR9: 1 MiB read, symlink, directory, FIFO with a 2 s timeout, /dev/null, socket, three hook swaps, F_GETFL clear, /dev/fd leak counts, error text." },
+    { id: "step-3", label: "3. CLI wiring and help (PR 1)", note: "Depends on 2. Tests: one per refusal, checking exit 3, exact stderr and empty stdout; updated directory case; mapping order." },
+    { id: "step-4", label: "4. task cross in verify (PR 1)", note: "Depends on 1. GOOS=windows go build; linux and freebsd go vet." },
+    { id: "step-5", label: "5. Threat model, safefs section (PR 1)", note: "Depends on 2-3. Records the parent-directory gap until PR 2." },
+    { id: "step-6", label: "6. Linux openat walk (PR 2)", note: "Depends on PR 1. Tests FR11-FR12, '..', fd leaks on walk failures; run in a Linux container." },
+    { id: "step-7", label: "7. macOS O_NOFOLLOW_ANY and system-link rule (PR 2)", note: "Depends on PR 1. Tests FR11-FR14: raw t.TempDir() and /tmp succeed; injected-check prefix table." },
+    { id: "step-8", label: "8. CLI help and symlinked-parent test (PR 2)", note: "Depends on 6-7." },
+    { id: "step-9", label: "9. Threat model update and ADR 0002 (PR 2)", note: "Depends on 6-8." }
+  ]}
+/>
+
+## Verification
+
+- `task test` after each step. Before each PR is marked ready, `task verify` must pass: fmt, lint, test, cross, gosec, govulncheck, gitleaks.
+- Linux run, since CI runs no Go tests: `docker run --rm -v "$PWD":/src -w /src golang:1.27 go test ./...`, with the result noted in the PR.
+- Break-the-guard check, then revert: remove `SameFile`, the `ELOOP` mapping, `setBlocking`, and (in PR 2) `oNofollowAny`, and confirm the matching tests fail.
+- Manual checks:
+  - `redact` on a symlink, a `mkfifo` pipe (must not hang), `/dev/null` and a directory: each exits 3 with the message above.
+  - PR 2: a symlinked parent directory is refused, and `/tmp/...` works on macOS.
+- Reviews: `staff-engineering-reviewer` and `security-reviewer` on each PR.

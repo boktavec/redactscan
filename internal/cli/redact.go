@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/boktavec/redactscan/internal/redactor"
+	"github.com/boktavec/redactscan/internal/safefs"
 )
 
 const (
@@ -19,11 +19,8 @@ const (
 	stdinName = "stdin"
 )
 
-// openInput is the only function that touches the filesystem. REDACT-10
-// replaces it with a safe regular-file open; until then a symlink is
-// followed, a FIFO can block and a device is read.
 func openInput(path string) (io.ReadCloser, error) {
-	return os.Open(path) // #nosec G304 -- the user names the file to redact; safe open is REDACT-10
+	return safefs.OpenRegular(path)
 }
 
 func runRedact(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -88,7 +85,18 @@ func readInput(fromStdin bool, path string, stdin io.Reader, stderr io.Writer) (
 }
 
 func openReason(err error) string {
+	var nre *safefs.NotRegularError
 	switch {
+	case errors.Is(err, safefs.ErrSymlink):
+		return "symlink refused"
+	case errors.As(err, &nre):
+		return "not a regular file (" + string(nre.Type) + ")"
+	case errors.Is(err, safefs.ErrNotRegular):
+		return "not a regular file"
+	case errors.Is(err, safefs.ErrChanged):
+		return "file changed during open"
+	case errors.Is(err, safefs.ErrUnsupportedPlatform):
+		return "unsupported platform"
 	case errors.Is(err, fs.ErrNotExist):
 		return "not found"
 	case errors.Is(err, fs.ErrPermission):

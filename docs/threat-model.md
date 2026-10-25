@@ -78,13 +78,40 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 
 - Bound the number of concurrent `Redact` calls: budget about 100 MiB of heap growth per in-flight call. Real memory use is higher under the default `GOGC`, so budget above that figure or set `GOMEMLIMIT`.
 - Read at most `MaxInputSize+1` bytes (`io.LimitReader`) and reject anything longer; never split input across `Redact` calls (labels and multi-line blocks are per call).
-- Open only regular files; validate paths and refuse unsafe symlink traversal.
+- Open only regular files; validate paths and refuse unsafe symlink traversal. Met by `internal/safefs` (see "Safe file opening"): no symlink in any component of the path as typed.
 - Write nothing until `Redact` succeeds; write `-o` output through a temp file in the same directory, then rename.
 - Treat `ErrVerificationFailed` as a hard stop, not a prompt to retry with fewer detectors.
 
 ### Follow-ups
 
 - `docs/architecture.md` still uses the product name "Sentinel" (`sentinel redact`, `cmd/sentinel/`) and says repeated raw values map to the same pseudonym "within a session". The redactor core scopes pseudonyms to one call (ADR 0001). Reconcile the name and that sentence in a separate change.
+
+## Safe file opening (`internal/safefs`)
+
+`safefs.OpenRegular(path)` is the filesystem trust boundary for input files. The path, the file and the directories on the way may be attacker-controlled (cloned repos, extracted archives). See `docs/features/safe-input-open/spec.md`.
+
+### Controls
+
+- **No symlink in any typed component.** macOS opens with `O_NOFOLLOW_ANY` (`0x20000000`, defined locally because `syscall` does not export it); Linux walks the path with `openat`, opening each directory with `O_DIRECTORY|O_NOFOLLOW` from the previous descriptor. A symlinked parent (`logs -> /elsewhere`, as in a cloned repo) is refused with `ErrSymlink`, as is one swapped in after the check. Linux reports `ENOTDIR` rather than `ELOOP` for a symlink opened with `O_DIRECTORY|O_NOFOLLOW`; the walk then `Lstat`s the typed prefix to report `ErrSymlink` (a race can only change which refusal is reported; the open has already failed). Interrupted (`EINTR`) walk syscalls are retried.
+- **Final component not followed.** `Lstat` refuses a symlink (to a file, directory or nothing) before opening; the open uses `O_NOFOLLOW`, so a symlink swapped in after `Lstat` fails with `ELOOP` and is reported as `ErrSymlink`.
+- **Identity and type re-checked on the open descriptor.** After the open, `Fstat` must be the same file as `Lstat` (`os.SameFile`, else `ErrChanged`) and a regular file (else `NotRegularError`). Directories, FIFOs, devices and sockets are refused with a typed error naming the kind.
+- **No blocking.** The open uses `O_NONBLOCK`, so a FIFO swapped in after `Lstat` cannot hang the open; `O_NOCTTY` keeps a terminal device from becoming the controlling terminal. `O_NONBLOCK` is cleared before the file is returned, because Go never clears it.
+- **Nothing is read** inside `safefs`; every check passes before any byte is read.
+- **Fixed error text.** `Error()` never contains the path, file contents or OS error text; OS errors unwrap to a bare `syscall.Errno` so `fs.ErrNotExist` and `fs.ErrPermission` still match.
+- **Fail closed.** Any unexpected condition closes the descriptor and refuses the open. Tests assert no descriptor leaks on every refusal path tests can trigger; the fstat and set-blocking failure paths are verified by inspection.
+- **macOS system links.** `/tmp`, `/var` and `/etc` are symlinks to `private/...`, and `$TMPDIR` lives under `/var/folders`. A path with the literal prefix `/tmp/`, `/var/` or `/etc/` is rewritten to `/private/...` only if, at run time, that entry in `/` is a symlink owned by root whose target is exactly `private/<name>`. Other spellings (`//tmp`, `/./tmp`) are not rewritten and are refused. Entries in `/` are writable only by root, so a user or a cloned repo cannot forge them. The rest of the path is still checked by `O_NOFOLLOW_ANY`.
+- **Relative paths.** Components after the current directory are checked; the current directory itself, and anything above it, is not re-checked (the kernel already resolved it).
+- **Platforms.** macOS and Linux. Every other OS gets `ErrUnsupportedPlatform`; there is no plain-open fallback. `task cross` vets for windows, freebsd and linux (native, amd64 and 386); it proves compilation only, not behavior.
+
+### Accepted risks
+
+- **Directories need read permission on Linux.** The walk opens each directory `O_RDONLY`, so a search-only (`--x`) directory in the path fails with permission denied (fail closed).
+- **macOS allowlist depends on the system layout.** If `/tmp`, `/var` or `/etc` are not root-owned links to `private/...`, no rewrite happens and such paths are refused; pass `/private/...` or a relative path.
+- **Metadata traversal before refusal.** The pre-open `os.Lstat` resolves symlinked parents, so metadata access to the target (for example an autofs, NFS or FUSE mount) can happen before the refusal. A dangling symlinked parent may be reported as `cannot open` rather than `symlink refused`.
+- **Not verified here:** behavior on kernels without `O_NOFOLLOW_ANY` (Go 1.27 requires a newer macOS, Assumed from the release notes, so older systems are out of support) and on filesystems that report unusual errnos.
+- **Hard links.** A hard link to a regular file is a regular file and is not detected. Creating one needs only search permission on the target's directories, write permission on the destination directory and the same filesystem (macOS has no `protected_hardlinks`), but the file is still read only with the invoking user's permissions.
+- **Content changes after open** (append, truncate) are not detected; the bounded read still applies.
+- **Regular files on network or FUSE filesystems** can block on read.
 
 ## CLI (`cmd/redactscan`, `internal/cli`)
 
@@ -108,6 +135,7 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 
 ### Accepted risks
 
-- **Unsafe file opening until REDACT-10.** `openInput` is a plain `os.Open`: symlinks are followed, a FIFO with no writer blocks, a device is read, and a directory fails on read (exit 3). REDACT-10 replaces it with a regular-file-only open. Running `redact` on a file inside untrusted content (a cloned repo, an extracted archive) can therefore disclose a symlink target, and its uncovered formats pass through. This does not yet satisfy "open only regular files" in the constraints above. REDACT-10 must add regression tests: symlink refused, FIFO refused without blocking, device refused, directory refused at open.
+- **Symlinks anywhere in the input path are refused.** `openInput` uses `safefs.OpenRegular`; `redact logs/app.log` where `logs` is a symlink inside untrusted content (a cloned repo, an extracted archive) exits 3 with `symlink refused`. See ADR 0002.
+- **Symlinked input files are refused.** Inputs that previously worked through a symlink now exit 3 with `symlink refused`; there is no flag to allow them.
 - **Partial stdout write.** A closed stdout pipe ends the process via SIGPIPE (shell status 141); other write errors, such as a full disk, exit 3. Bytes already written are redacted output, never raw input.
 - **`-o` output file** is not implemented; the temp-file-plus-rename rule applies when it is added.

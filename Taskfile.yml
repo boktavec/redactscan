@@ -32,6 +32,16 @@ tasks:
     cmds:
       - go test ./...
 
+  cross:
+    desc: Check that files for other operating systems compile
+    cmds:
+      - GOOS=windows go vet ./...
+      - GOOS=linux go vet ./...
+      - GOOS=linux GOARCH=amd64 go vet ./...
+      - GOOS=linux GOARCH=arm64 go vet ./...
+      - GOOS=linux GOARCH=386 go vet ./...
+      - GOOS=freebsd go vet ./...
+
   vuln:
     desc: Scan Go dependencies for known vulnerabilities
     cmds:
@@ -54,5 +64,6 @@ tasks:
       - task: fmt
       - task: lint
       - task: test
+      - task: cross
       - task: security
       - task: secrets

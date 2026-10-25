@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/boktavec/redactscan/internal/redactor"
+	"github.com/boktavec/redactscan/internal/safefs"
 )
 
 const marker = "MARKER-input-text-7f3a"
@@ -194,6 +197,31 @@ func TestRefusalReasonMapping(t *testing.T) {
 	}
 }
 
+func TestOpenReasonMapping(t *testing.T) {
+	wrap := func(err error) error { return fmt.Errorf("wrapped %s: %w", marker, err) }
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"symlink", wrap(safefs.ErrSymlink), "symlink refused"},
+		{"typed not regular", wrap(&safefs.NotRegularError{Type: safefs.TypeSocket}), "not a regular file (socket)"},
+		{"sentinel not regular", wrap(safefs.ErrNotRegular), "not a regular file"},
+		{"changed", wrap(safefs.ErrChanged), "file changed during open"},
+		{"unsupported", wrap(safefs.ErrUnsupportedPlatform), "unsupported platform"},
+		{"not exist", wrap(fs.ErrNotExist), "not found"},
+		{"permission", wrap(fs.ErrPermission), "permission denied"},
+		{"other", errors.New("contains " + marker), "cannot open"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := openReason(tt.err); got != tt.want {
+				t.Errorf("openReason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRedactIOErrors(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "no such\nfile")
@@ -234,7 +262,36 @@ func TestRedactIOErrors(t *testing.T) {
 	})
 	t.Run("directory", func(t *testing.T) {
 		got := run([]string{"redact", dir}, strings.NewReader(""))
-		assertFailure(t, got, 3, "")
+		assertFailure(t, got, 3, `redactscan: cannot open "`+dir+`": not a regular file (directory)`+"\n")
+	})
+	t.Run("symlink", func(t *testing.T) {
+		target := writeTemp(t, marker+" "+awsKey(11))
+		link := filepath.Join(dir, "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		got := run([]string{"redact", link}, strings.NewReader(""))
+		assertFailure(t, got, 3, `redactscan: cannot open "`+link+`": symlink refused`+"\n", marker, awsKey(11))
+	})
+	t.Run("symlinked parent directory", func(t *testing.T) {
+		real := filepath.Join(dir, "real")
+		if err := os.Mkdir(real, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(real, "app.log"), []byte(marker+" "+awsKey(12)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		logs := filepath.Join(dir, "logs")
+		if err := os.Symlink(real, logs); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(logs, "app.log")
+		got := run([]string{"redact", path}, strings.NewReader(""))
+		assertFailure(t, got, 3, `redactscan: cannot open "`+path+`": symlink refused`+"\n", marker, awsKey(12))
+	})
+	t.Run("device", func(t *testing.T) {
+		got := run([]string{"redact", os.DevNull}, strings.NewReader(""))
+		assertFailure(t, got, 3, `redactscan: cannot open "`+os.DevNull+`": not a regular file (device)`+"\n")
 	})
 	t.Run("stdin read error", func(t *testing.T) {
 		// Fake: a reader that fails after some bytes, which the OS will not
