@@ -17,6 +17,10 @@ Expect: the approved spec/plan and acceptance criteria (e.g. `docs/features/<id>
 
 First establish: intended behavior, what actually changed (`git diff <base>...HEAD`), affected contracts/components, relevant failure modes, and what verification is possible here.
 
+## Open Code Review (supplementary)
+
+Read `.agents/skills/open-code-review-delegate/SKILL.md` and `SOURCE.md` (the latter's constraints win). If the `ocr` CLI is installed, use its delegate mode (`ocr delegate preview` / `ocr delegate rule`) to get the reviewable file list and review rules, then review each file yourself, with no LLM provider needed. Its checklist and coverage accounting supplement, never replace, your own inspection. State in the report whether it was used. If `ocr` is missing, say so and continue; never install it or let it change code.
+
 ## Rules of engagement
 
 - **Do not modify production code, config, migrations, or existing tests.** You may create temporary, isolated tests/repro scripts/benchmarks, but only in the session scratchpad or a clearly named temp location outside tracked source, and never commit them. Preserve evidence of failures (commands + output).
