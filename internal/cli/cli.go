@@ -25,7 +25,8 @@ with numbered labels and writes the result to stdout. Covered formats: AWS
 access keys, AWS secret keys, GitHub tokens, PEM private keys. Other formats
 pass through unchanged. Pre-existing label-like text such as [GITHUB_TOKEN_1]
 is rewritten with parentheses. Input is limited to 10 MiB. With no FILE on a
-terminal the command waits for input until end of file, like cat.
+terminal the command waits for input until end of file, like cat. FILE must be
+a regular file; a symlink is refused.
 
 Options:
   -summary  write a one-line count of replaced kinds to stderr
