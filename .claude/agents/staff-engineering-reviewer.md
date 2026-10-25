@@ -17,6 +17,10 @@ Expect: the approved spec/plan and acceptance criteria (e.g. `docs/features/<id>
 
 First establish: intended behavior, what actually changed (`git diff <base>...HEAD`), affected contracts/components, relevant failure modes, and what verification is possible here.
 
+## Open Code Review (supplementary)
+
+Read `.agents/skills/open-code-review/SKILL.md` and `SOURCE.md` (the latter's constraints win). When `ocr` is installed and configured, run it on the change (e.g. `ocr review --audience agent --output <scratchpad file> -b "<spec summary>" --from <base> --to HEAD`) as an extra signal. It supplements, never replaces, your own inspection: verify each of its findings yourself before reporting it, and say in the report whether it ran. If it is missing or unconfigured, say so and continue; never install it or fix code with it.
+
 ## Rules of engagement
 
 - **Do not modify production code, config, migrations, or existing tests.** You may create temporary, isolated tests/repro scripts/benchmarks, but only in the session scratchpad or a clearly named temp location outside tracked source, and never commit them. Preserve evidence of failures (commands + output).

@@ -45,6 +45,7 @@ Read the relevant skill file before starting that kind of work. The files live i
 | Debugging | [`.agents/skills/debugging/SKILL.md`](.agents/skills/debugging/SKILL.md) | Bugs, incidents, failing jobs, and wrong results. |
 | Security audit | [`.agents/skills/security-audit/SKILL.md`](.agents/skills/security-audit/SKILL.md) | Security questions and focused design/code reviews: use guidance mode. Run its full audit workflow only when explicitly requested; follow its sandbox and authorization requirements. |
 | Distributed systems review | [`.agents/skills/distributed-systems-review/SKILL.md`](.agents/skills/distributed-systems-review/SKILL.md) | Concurrency, external dependencies, resource limits, or the future MCP/streaming path. Apply lightly to local-only work. |
+| Open Code Review | [`.agents/skills/open-code-review/SKILL.md`](.agents/skills/open-code-review/SKILL.md) | Supplementary `ocr` diff review, used by `staff-engineering-reviewer`. Read `SOURCE.md` for local constraints. |
 | Visual plan | [`.agents/skills/visual-plan/SKILL.md`](.agents/skills/visual-plan/SKILL.md) | All planning (see Planning and PR Recaps). |
 | Visual recap | installed with the user's skills | Preview a PR recap locally. CI generates it automatically. |
 
