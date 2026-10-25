@@ -3,6 +3,7 @@ package safefs
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"syscall"
 	"testing"
 )
@@ -50,6 +51,21 @@ func TestFileType(t *testing.T) {
 	for _, tt := range tests {
 		if got := fileType(tt.mode); got != tt.want {
 			t.Errorf("fileType(%v) = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestOpErrorStripsLinkAndSyscallErrors(t *testing.T) {
+	for name, wrapped := range map[string]error{
+		"link":    &os.LinkError{Op: "link", Old: "/secret/a", New: "/secret/b", Err: syscall.EPERM},
+		"syscall": os.NewSyscallError("/secret/c", syscall.EPERM),
+	} {
+		err := newOpError("link", wrapped)
+		if got, want := err.Error(), "safefs: link failed"; got != want {
+			t.Errorf("%s: Error() = %q, want %q", name, got, want)
+		}
+		if got := errors.Unwrap(err); got != syscall.EPERM {
+			t.Errorf("%s: Unwrap() = %#v, want EPERM", name, got)
 		}
 	}
 }

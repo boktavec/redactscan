@@ -1,0 +1,227 @@
+---
+title: "Cleaned file output: write <name>_cleaned<ext> next to the input, atomically and without clobbering"
+---
+
+## Outcome
+
+`redactscan redact FILE` writes the redacted result to `<name>_cleaned<ext>` in the same directory as FILE, with mode 0600. The file appears only after redaction succeeds, through a fully written and fsynced temp file that is atomically linked into place (no clobber) or renamed into place (`-force`). A failure never leaves partial or raw output or a temp file, and concurrent runs never produce a mixed file. Story: [REDACT-11](http://localhost:8080/issue/REDACT-11). Full spec: `docs/features/cleaned-file-output/spec.md`.
+
+Concrete example:
+
+- `redactscan redact logs/app.log` creates `logs/app_cleaned.log` and prints `redactscan: wrote "logs/app_cleaned.log"` and `redactscan: note: output may still contain uncovered secret formats` on stderr.
+- Running it again exits 3 with `already exists (use -force to replace)`.
+- `redact -force logs/app.log` replaces the file atomically.
+- `redact -stdout logs/app.log | less` keeps today's behavior, and stdin input still goes to stdout.
+
+<Callout id="breaking-callout" tone="warning">
+
+**Breaking change (accepted by the user).** `redact FILE` used to print to stdout. Now it writes a file, and stdout is empty with exit 0, so `redact f | cmd` and `redact f > out` silently get nothing. Use `-stdout` for the old behavior. ADR 0003 records the decision, and the release notes call it out.
+
+</Callout>
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:**
+
+- `-o PATH`
+- signal handling to remove temp files
+- `golang.org/x/sys`, `renameat2` or `openat2`
+- `.gitignore` checks or `git check-ignore` (never shell out)
+- Windows
+- detecting inputs that are already `_cleaned`
+
+</Callout>
+
+## Delivery: two stacked PRs
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size"]}
+  rows={[
+    ["PR 1", "Spike tests S1-S3; newOpError strips LinkError and SyscallError; openNoFollow accepts \".\" and \"/\"; safefs.WriteSibling with the pinned os.Root and no-clobber link or replace rename; other-OS stub; safefs docs, threat model, ADR 0003, ADR 0002 amended note", "about 400-480 lines incl. tests (move the spikes to a PR 0 if it goes over 500)"],
+    ["PR 2", "cleanedName and output-path derivation; -stdout and -force; file output by default; stderr messages and error mapping; existing tests moved to -stdout; help, README, threat-model CLI section, redact-command spec superseded note", "about 300-380 lines incl. tests"]
+  ]}
+/>
+
+## Naming
+
+<Table
+  id="naming-table"
+  columns={["Input", "Output", "Rule"]}
+  rows={[
+    ["app.log", "app_cleaned.log", "Insert before the last extension"],
+    ["a.2024.log", "a.2024_cleaned.log", "Only the last dot counts"],
+    ["x.tar.gz", "x.tar_cleaned.gz", "Accepted quirk"],
+    ["Makefile", "Makefile_cleaned", "No extension: append"],
+    [".env", ".env_cleaned", "Leading dots are not an extension"],
+    [".env.local", ".env_cleaned.local", "Last dot after the leading dots"],
+    ["x.", "x_cleaned.", "A trailing dot is an empty extension"],
+    ["..foo", "..foo_cleaned", "Only leading dots: append"],
+    ["app_cleaned.log", "app_cleaned_cleaned.log", "Allowed; no special case"]
+  ]}
+/>
+
+The directory is the typed input path up to its last `/`, with no `Clean`: `app.log` uses `.`, `/app.log` uses `/`, and `logs/app.log` uses `logs`. Messages quote the typed spelling with `strconv.Quote` and never print a resolved path.
+
+## How WriteSibling writes
+
+<Diagram id="flow-diagram" frame="show" caption="Every operation after pinning is a single-component call on the pinned os.Root. Any error before commit removes the temp file.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">1. Pin the directory</div>
+    <div class="diagram-node">split the typed path at the last /</div>
+    <div class="diagram-node">openNoFollow(dir, O_DIRECTORY)</div>
+    <div class="diagram-node">os.OpenRoot(dir) + SameFile(dir fd)</div>
+    <div class="diagram-node">SameFile(root.Lstat(base), input fd)</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">2. Stage</div>
+    <div class="diagram-node">root.Lstat(out): exists / symlink / not regular (UX only)</div>
+    <div class="diagram-node">root.OpenFile(.redactscan-hex.tmp, O_EXCL, 0600)</div>
+    <div class="diagram-node">f.Chmod(0600), write, sync, close</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">3. Re-verify</div>
+    <div class="diagram-node">beforeCommit hook (tests only)</div>
+    <div class="diagram-node">reopen the dir path no-follow</div>
+    <div class="diagram-node">not SameFile: ErrChanged</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">4. Commit</div>
+    <div class="diagram-node">default: root.Link then root.Remove(temp)</div>
+    <div class="diagram-node">-force: root.Rename(temp, out)</div>
+    <div class="diagram-node">dir fsync, best effort</div>
+  </div>
+  <div class="diagram-box platforms">
+    <span class="diagram-pill">nothing is created before Redact succeeds</span>
+    <span class="diagram-pill">a symlink at out is never followed</span>
+    <span class="diagram-pill">output lands only beside the input that was read</span>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.platforms { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 8px; }
+```
+
+</Diagram>
+
+```go
+// internal/safefs (darwin, linux)
+func WriteSibling(inputPath string, input fs.FileInfo, outName string, data []byte, replace bool) (tempLeft bool, err error)
+```
+
+## Why the guarantees hold
+
+<Table
+  id="guarantees-table"
+  columns={["Threat", "Guarantee"]}
+  rows={[
+    ["Partial or raw output", "Nothing is created before Redact succeeds; the destination appears only through an atomic link or rename of a fully written, fsynced file."],
+    ["Concurrent runs", "Each run has its own O_EXCL temp file. link is atomic no-clobber (exactly one run wins); rename is atomic replace (last one wins, with a whole file)."],
+    ["Symlink at the destination", "Refused by the pre-check. If swapped in later, link gives EEXIST and rename replaces the link itself; the target is never written."],
+    ["Directory, FIFO or device at the destination", "rename over a directory fails; a FIFO or device entry is only replaced, never opened."],
+    ["Symlinked parent directory in content", "Refused by the REDACT-10 input open and by the no-follow directory open."],
+    ["Parent directory swapped mid-run", "The root is pinned to a verified directory descriptor and bound to the input's inode; a detected swap gives ErrChanged, and an undetected one still lands in the original directory."],
+    ["Umask or inherited mode", "0600 at create time plus f.Chmod(0600) on the descriptor. Inherited ACLs are an accepted risk."]
+  ]}
+/>
+
+<Callout id="root-decision" tone="decision">
+
+**Why `os.Root` here, when ADR 0002 rejected it.** ADR 0002 rejected `os.Root` for opening input paths, because it follows symlinks within the root across intermediate components. Here it is pinned to a directory descriptor already verified symlink-free and is used only with single-component names, so there are no intermediate components. **Verified** in the Go 1.27.1 source: `Root.Link`, `Rename`, `Remove`, `Lstat` and `OpenFile` exist and use `linkat`/`renameat` on Unix. A by-path rename is not safe under a parent swap: the security review verified on macOS that it follows the swapped parent.
+
+</Callout>
+
+## Messages and exit codes
+
+<Table
+  id="messages-table"
+  columns={["Case", "CLI stderr", "Exit"]}
+  rows={[
+    ["Success", "[summary line] + wrote \"OUT\" + note: output may still contain uncovered secret formats", "0"],
+    ["Temp file not removed", "adds: temporary file may remain (no name)", "0 or 3"],
+    ["Destination exists, no -force", "cannot write \"OUT\": already exists (use -force to replace)", "3"],
+    ["Destination is a symlink (-force)", "cannot write \"OUT\": symlink refused", "3"],
+    ["Destination is a directory, FIFO, device or socket", "cannot write \"OUT\": not a regular file (TYPE)", "3"],
+    ["Directory or input changed", "cannot write \"OUT\": file changed during write", "3"],
+    ["No hard links on the filesystem", "cannot write \"OUT\": no-clobber write not supported on this filesystem", "3"],
+    ["EACCES / ENOSPC / ENAMETOOLONG / EROFS", "permission denied / no space left / name too long / read-only filesystem", "3"],
+    ["Anything else", "cannot write \"OUT\": write failed", "3"],
+    ["Redaction refused", "unchanged; nothing is written anywhere", "1"],
+    ["Flag after FILE (redact f -stdout)", "usage error", "2"]
+  ]}
+/>
+
+## Files
+
+<FileTree
+  id="files-tree"
+  entries={[
+    { path: "internal/safefs/write_unix.go", change: "added", note: "PR 1. WriteSibling (darwin, linux)." },
+    { path: "internal/safefs/write_other.go", change: "added", note: "PR 1. Stub returning ErrUnsupportedPlatform." },
+    { path: "internal/safefs/safefs.go", change: "modified", note: "PR 1. Package doc covers output; newOpError strips LinkError and SyscallError; ErrInvalidName, ErrTempNames; beforeCommit hook." },
+    { path: "internal/safefs/nofollow_linux.go", change: "modified", note: "PR 1. A path with no components (\".\", \"/\") opens the start directory." },
+    { path: "internal/safefs/write_unix_test.go", change: "added", note: "PR 1. Spikes S1-S3, swaps, binding, umask, injected failures, concurrency, fd leaks." },
+    { path: "internal/cli/name.go", change: "added", note: "PR 2. cleanedName." },
+    { path: "internal/cli/redact.go", change: "modified", note: "PR 2. -stdout, -force, file output by default, readInput returns FileInfo, error mapping." },
+    { path: "internal/cli/cli.go", change: "modified", note: "PR 2. Usage text." },
+    { path: "internal/cli/cli_test.go", change: "modified", note: "PR 2. FILE tests use -stdout or assert the file; new FR tests." },
+    { path: "docs/adr/0003-cleaned-file-output.md", change: "added", note: "PR 1. Default file output, pinned os.Root, no clobber, accepted risks, breaking change." },
+    { path: "docs/adr/0002-safe-input-open.md", change: "modified", note: "PR 1. 'Amended by ADR 0003' note only." },
+    { path: "docs/threat-model.md", change: "modified", note: "PR 1 safefs output controls; PR 2 CLI section, caller constraints, removes the '-o not implemented' line." },
+    { path: "docs/features/redact-command/spec.md", change: "modified", note: "PR 2. FR1/FR7 superseded note." },
+    { path: "README.md", change: "modified", note: "PR 2. New default, -stdout, -force; never says the output is safe to commit or share." }
+  ]}
+/>
+
+## Accepted risks
+
+<Callout id="risks-callout" tone="risk">
+
+- **Fatal signals.** SIGKILL, SIGINT, SIGTERM or a crash during the write can leave a hidden `.redactscan-*.tmp` file holding redacted bytes.
+- **Power loss.** The directory fsync is best effort, so a rename just before power loss may be lost.
+- **Ignore and sync rules.** The derived name may not match them (for example `.env` becomes `.env_cleaned`), and uncovered secret formats pass through to the file. The user accepted both; stderr always prints the note.
+- **Shared directories.** In sticky, world-writable or group-writable directories another user can create the destination first, so no-clobber refuses (fail closed).
+- **Replaced files.** Hard links to an old destination keep the old content. A replaced file is reset to 0600 and owned by the invoking user (root when run as root). Inherited ACLs can grant more access than 0600.
+- **Filesystems without hard links.** No-clobber mode fails closed; `-force` works.
+- **Platforms.** macOS and Linux only.
+
+</Callout>
+
+## Implementation steps
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "1. Spike tests S1-S3 (PR 1)", note: "S1: O_CREAT|O_EXCL|O_NOFOLLOW_ANY on a symlink (EEXIST or ELOOP) and on a symlinked parent (ELOOP), macOS. S2: Root.OpenFile(O_EXCL) on a planted symlink gives EEXIST, and Root.Rename over a symlink replaces the link, on both OSes. S3: the link errno on a filesystem without hard links. Record each as Verified or Assumed." },
+    { id: "step-2", label: "2. newOpError hardening and openNoFollow for \".\" and \"/\" (PR 1)", note: "Depends on 1. Tests: LinkError and SyscallError unwrap to Errno with no path in the text; the directory opens work." },
+    { id: "step-3", label: "3. safefs.WriteSibling and the stub (PR 1)", note: "Depends on 2. Tests: happy path, 0600 under umask 000 and 077, owner, no clobber, replace refusals, beforeCommit swaps (symlink at the destination, directory to symlink, real directory with a same-named temp, planted temp name), binding ErrChanged, injected write/short/ENOSPC/sync/close/link/rename failures, tempLeft, concurrency, fd leaks." },
+    { id: "step-4", label: "4. PR 1 docs (PR 1)", note: "Depends on 3. safefs package doc, threat-model Safe file opening, ADR 0003, ADR 0002 amended note. Run task verify and the Linux container run." },
+    { id: "step-5", label: "5. cleanedName and output-path derivation (PR 2)", note: "Depends on PR 1. Tests: naming table, typed-path splits, a 250-byte name gives name too long with no temp left." },
+    { id: "step-6", label: "6. CLI flags, default mode, messages, error mapping (PR 2)", note: "Depends on 5. Tests: FR1, FR4-FR14; existing tests moved to -stdout; ESC, newline and U+202E filenames quoted; directory listing unchanged after exits 1 and 3." },
+    { id: "step-7", label: "7. Help, README, threat-model CLI section, redact-command spec note (PR 2)", note: "Depends on 6. The wording test from REDACT-2 FR13 still passes. Run task verify." }
+  ]}
+/>
+
+## Verification
+
+- `task test` after each step. Before each PR is marked ready, `task verify` must pass: fmt, lint, test, cross, security, secrets.
+- Linux run (CI runs no Go tests): `docker run --rm -v "$PWD":/src -w /src golang:1.27 go test ./...`, with the result noted in the PR.
+- Break-the-guard check, then revert each change and confirm the matching test fails:
+  - remove the root `SameFile` check
+  - remove `f.Chmod`
+  - replace `Link` with `Rename`
+  - remove the temp cleanup
+- Manual checks:
+  - `redact app.log` twice: the second run gives `already exists`.
+  - `-force` replaces the file.
+  - `ln -s target app_cleaned.log` then `redact -force app.log`: `symlink refused`, and `target` is unchanged.
+  - `redact -stdout app.log` prints to stdout.
+  - stdin still prints to stdout.
+  - `stat` shows mode 0600.
+- Reviews: `staff-engineering-reviewer` and `security-reviewer` on each PR. `security-reviewer` also confirms the path-binding and swap tests exist and pass.

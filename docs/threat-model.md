@@ -113,6 +113,16 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 - **Content changes after open** (append, truncate) are not detected; the bounded read still applies.
 - **Regular files on network or FUSE filesystems** can block on read.
 
+### Output files (`safefs.WriteSibling`)
+
+`WriteSibling` creates a new file beside an input. It is not yet used by the CLI (see ADR 0003 and `docs/features/cleaned-file-output/spec.md`).
+
+- **Pinned directory.** The directory is opened without following symlinks and pinned as an `os.Root` opened through that verified descriptor (`/proc/self/fd/<n>` or `/dev/fd/<n>`, never the path again, so a swapped directory or FIFO cannot redirect or hang it), with a `SameFile` check as defense in depth. The input's inode is checked in that directory, as a consistency check only: a lookalike directory holding a hard link passes it. All creates, links, renames and removes are single-component calls on that root, so a directory swapped mid-run cannot redirect the output. The typed path is re-verified before commit (`ErrChanged`).
+- **Atomic, no partial output.** A 0600 `O_EXCL` temp file is written, fsynced and closed, then linked (no clobber, atomic `EEXIST`) or renamed (replace). A symlink at the destination is never written through. The temp file is removed on every error path.
+- **Mode.** 0600 set with `Chmod` on the descriptor, so umask cannot change it.
+
+Accepted risks: a fatal signal can leave a hidden `.redactscan-*.tmp` with redacted bytes; the directory fsync is best effort; inherited ACLs can widen access; other users can pre-create the destination in shared directories (no-clobber refuses), and in a group- or world-writable directory without the sticky bit they can also rename the closed temp file away and plant their own under its name before link or rename (equivalent risk); hard links to a replaced destination keep the old content; filesystems without hard links refuse no-clobber writes; root writes a root-owned file.
+
 ## CLI (`cmd/redactscan`, `internal/cli`)
 
 `redactscan redact [-summary] [FILE|-]` runs `redactor.Redact` over a file or stdin and writes the result to stdout. See `docs/features/redact-command/spec.md`.

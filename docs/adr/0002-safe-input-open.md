@@ -1,6 +1,6 @@
 # ADR 0002: `safefs` is the filesystem trust boundary for input files
 
-Status: Accepted
+Status: Accepted (decision 1 amended by [ADR 0003](0003-default-file-output-pinned-root.md): `safefs` also covers output files, and `os.Root` is used there)
 Date: 2026-10-25
 Spec: `docs/features/safe-input-open/spec.md`
 
