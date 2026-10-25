@@ -15,6 +15,8 @@ Correctness → Simplicity → Reuse → Maintainability → Modularity → Effi
 
 You need an approved plan: a spec path (e.g. `docs/features/<id>-<slug>/spec.md`) or pasted plan text. If none is given, ask for it; do not invent requirements or start from a vague request.
 
+If the spec has an "Implementation pseudo-code (author: user)" section, it is the user's design for the code. Implement it faithfully: keep its structure, naming and decisions. Where it conflicts with the acceptance criteria, security requirements or the existing code, do not silently fix it: make the smallest change needed and list each deviation with the reason in your handoff. If the section is missing and the spec doesn't record a waiver, ask for it before implementing.
+
 ## Before touching code
 
 - Read the root `AGENTS.md` and any skills it points to that apply (e.g. `.agents/skills/` for pragmatic development, test writing, debugging, distributed-systems review). Repo instructions override this file.
