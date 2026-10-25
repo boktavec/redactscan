@@ -85,3 +85,29 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 ### Follow-ups
 
 - `docs/architecture.md` still uses the product name "Sentinel" (`sentinel redact`, `cmd/sentinel/`) and says repeated raw values map to the same pseudonym "within a session". The redactor core scopes pseudonyms to one call (ADR 0001). Reconcile the name and that sentence in a separate change.
+
+## CLI (`cmd/redactscan`, `internal/cli`)
+
+`redactscan redact [-summary] [FILE|-]` runs `redactor.Redact` over a file or stdin and writes the result to stdout. See `docs/features/redact-command/spec.md`.
+
+### Controls
+
+- **Fail closed.** Stdout receives a single write, only after `Redact` succeeds. Every non-zero exit leaves stdout empty. A verification failure is a hard stop with no retry.
+- **Bounded read.** At most `MaxInputSize+1` bytes are read (`io.LimitReader`); longer input is refused.
+- **Fixed messages.** Stderr text is built from fixed strings, redactor kind constants and the user-supplied path quoted with `strconv.Quote`. `err.Error()` from the redactor or the OS is never printed, so input bytes cannot reach stderr.
+- **Wording.** Help and README never call the output safe; they state that other formats pass through.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success, or help requested. |
+| 1 | Redaction refused: too large, unsupported encoding, verification failed (kind named), or internal error. |
+| 2 | Usage error. |
+| 3 | I/O error: open, read, or stdout write. |
+
+### Accepted risks
+
+- **Unsafe file opening until REDACT-10.** `openInput` is a plain `os.Open`: symlinks are followed, a FIFO with no writer blocks, a device is read, and a directory fails on read (exit 3). REDACT-10 replaces it with a regular-file-only open. Running `redact` on a file inside untrusted content (a cloned repo, an extracted archive) can therefore disclose a symlink target, and its uncovered formats pass through. This does not yet satisfy "open only regular files" in the constraints above. REDACT-10 must add regression tests: symlink refused, FIFO refused without blocking, device refused, directory refused at open.
+- **Partial stdout write.** A closed stdout pipe ends the process via SIGPIPE (shell status 141); other write errors, such as a full disk, exit 3. Bytes already written are redacted output, never raw input.
+- **`-o` output file** is not implemented; the temp-file-plus-rename rule applies when it is added.
