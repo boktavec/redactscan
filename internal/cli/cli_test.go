@@ -105,8 +105,8 @@ func TestRedactFileAndStdin(t *testing.T) {
 		args  []string
 		stdin io.Reader
 	}{
-		{"file", []string{"redact", path}, strings.NewReader("")},
-		{"file ignores stdin", []string{"redact", path}, strings.NewReader("stdin data " + awsKey(3))},
+		{"file", []string{"redact", "-stdout", path}, strings.NewReader("")},
+		{"file ignores stdin", []string{"redact", "-stdout", path}, strings.NewReader("stdin data " + awsKey(3))},
 		{"dash", []string{"redact", "-"}, strings.NewReader(input)},
 		{"no argument", []string{"redact"}, strings.NewReader(input)},
 	}
@@ -340,8 +340,8 @@ func TestUsageErrors(t *testing.T) {
 		{"no args", nil, "redactscan: missing command\n"},
 		{"unknown command", []string{"scan"}, `redactscan: unknown command "scan"` + "\n"},
 		{"unknown flag", []string{"redact", "-nope"}, "redactscan: invalid arguments\n"},
-		{"two files", []string{"redact", "a", "b"}, "redactscan: expected at most one FILE argument\n"},
-		{"flag after file", []string{"redact", "app.log", "-summary"}, "redactscan: expected at most one FILE argument\n"},
+		{"two files", []string{"redact", "a", "b"}, "redactscan: expected at most one FILE argument (flags must come before FILE)\n"},
+		{"flag after file", []string{"redact", "app.log", "-summary"}, "redactscan: expected at most one FILE argument (flags must come before FILE)\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -377,7 +377,7 @@ func TestUsageWording(t *testing.T) {
 			t.Errorf("usage text contains %q", banned)
 		}
 	}
-	for _, want := range []string{"AWS", "GitHub", "private keys", "pass through unchanged", "10 MiB", "Exit codes"} {
+	for _, want := range []string{"AWS", "GitHub", "private keys", "pass through unchanged", "10 MiB", "Exit codes", "-stdout", "-force", "_cleaned", "BREAKING", "before\nFILE"} {
 		if !strings.Contains(usageText, want) {
 			t.Errorf("usage text lacks %q", want)
 		}

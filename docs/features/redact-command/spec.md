@@ -1,6 +1,7 @@
 # Redact command: spec
 
 Status: implemented, pending PR.
+Superseded in part: FR1 and FR7 describe `redact FILE` printing to stdout. Since REDACT-11 (`docs/features/cleaned-file-output/spec.md`, ADR 0003) FILE writes `<name>_cleaned<ext>` by default and `-stdout` restores the behavior below; stdin is unchanged.
 Story: [REDACT-2](http://localhost:8080/issue/REDACT-2) "redact command: file or stdin to stdout".
 Follow-up: [REDACT-10](http://localhost:8080/issue/REDACT-10) "Safe input file opening" replaces the `openInput` seam (see 3.3).
 Branch: `feat/redact-command`. Packages: `cmd/redactscan`, new `internal/cli`, small change to `internal/redactor` (Go stdlib only).

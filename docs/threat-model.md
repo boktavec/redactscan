@@ -79,7 +79,7 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 - Bound the number of concurrent `Redact` calls: budget about 100 MiB of heap growth per in-flight call. Real memory use is higher under the default `GOGC`, so budget above that figure or set `GOMEMLIMIT`.
 - Read at most `MaxInputSize+1` bytes (`io.LimitReader`) and reject anything longer; never split input across `Redact` calls (labels and multi-line blocks are per call).
 - Open only regular files; validate paths and refuse unsafe symlink traversal. Met by `internal/safefs` (see "Safe file opening"): no symlink in any component of the path as typed.
-- Write nothing until `Redact` succeeds; write `-o` output through a temp file in the same directory, then rename.
+- Write nothing until `Redact` succeeds. Output files go through `safefs.WriteSibling` (temp file in the pinned input directory, then atomic link or rename). A future `-o PATH` must reuse that rule; the CLI never writes a file by path.
 - Treat `ErrVerificationFailed` as a hard stop, not a prompt to retry with fewer detectors.
 
 ### Follow-ups
@@ -115,7 +115,7 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 
 ### Output files (`safefs.WriteSibling`)
 
-`WriteSibling` creates a new file beside an input. It is not yet used by the CLI (see ADR 0003 and `docs/features/cleaned-file-output/spec.md`).
+`WriteSibling` creates a new file beside an input. The CLI uses it for `redact FILE` (see ADR 0003 and `docs/features/cleaned-file-output/spec.md`).
 
 - **Pinned directory.** The directory is opened without following symlinks and pinned as an `os.Root` opened through that verified descriptor (`/proc/self/fd/<n>` or `/dev/fd/<n>`, never the path again, so a swapped directory or FIFO cannot redirect or hang it), with a `SameFile` check as defense in depth. The input's inode is checked in that directory, as a consistency check only: a lookalike directory holding a hard link passes it. All creates, links, renames and removes are single-component calls on that root, so a directory swapped mid-run cannot redirect the output. The typed path is re-verified before commit (`ErrChanged`).
 - **Atomic, no partial output.** A 0600 `O_EXCL` temp file is written, fsynced and closed, then linked (no clobber, atomic `EEXIST`) or renamed (replace). A symlink at the destination is never written through. The temp file is removed on every error path.
@@ -125,13 +125,13 @@ Accepted risks: a fatal signal can leave a hidden `.redactscan-*.tmp` with redac
 
 ## CLI (`cmd/redactscan`, `internal/cli`)
 
-`redactscan redact [-summary] [FILE|-]` runs `redactor.Redact` over a file or stdin and writes the result to stdout. See `docs/features/redact-command/spec.md`.
+`redactscan redact [-summary] [-stdout] [-force] [FILE|-]` runs `redactor.Redact` over a file or stdin. With FILE the result goes to `<name>_cleaned<ext>` beside FILE (mode 0600, no clobber unless `-force`); with stdin, or with `-stdout`, it goes to stdout. See `docs/features/redact-command/spec.md` (superseded for FILE output) and `docs/features/cleaned-file-output/spec.md`.
 
 ### Controls
 
-- **Fail closed.** Stdout receives a single write, only after `Redact` succeeds. Every non-zero exit leaves stdout empty. A verification failure is a hard stop with no retry.
+- **Fail closed.** Nothing is created or written until `Redact` succeeds. Stdout receives a single write; the output file appears only through `WriteSibling`. Every non-zero exit leaves nothing written anywhere: stdout is empty and no output or temp file remains (a failed temp removal is reported with a fixed line). A verification failure is a hard stop with no retry.
 - **Bounded read.** At most `MaxInputSize+1` bytes are read (`io.LimitReader`); longer input is refused.
-- **Fixed messages.** Stderr text is built from fixed strings, redactor kind constants and the user-supplied path quoted with `strconv.Quote`. `err.Error()` from the redactor or the OS is never printed, so input bytes cannot reach stderr.
+- **Fixed messages.** Stderr text is built from fixed strings, redactor kind constants and the user-supplied path quoted with `strconv.Quote` (the derived output path is quoted in the typed spelling, never an OS-resolved path). Write errors are mapped by errno or sentinel to a fixed reason. `err.Error()` from the redactor or the OS is never printed, so input bytes cannot reach stderr.
 - **Wording.** Help and README never call the output safe; they state that other formats pass through.
 
 ### Exit codes
@@ -139,13 +139,16 @@ Accepted risks: a fatal signal can leave a hidden `.redactscan-*.tmp` with redac
 | Code | Meaning |
 | --- | --- |
 | 0 | Success, or help requested. |
-| 1 | Redaction refused: too large, unsupported encoding, verification failed (kind named), or internal error. |
+| 1 | Redaction refused: too large, unsupported encoding, verification failed (kind named), or internal error. Nothing is written anywhere. |
 | 2 | Usage error. |
-| 3 | I/O error: open, read, or stdout write. |
+| 3 | I/O error: open, read, stdout write, or output create, link or rename failure, including a refused destination (exists without `-force`, symlink, non-regular, changed during write). |
 
 ### Accepted risks
 
-- **Symlinks anywhere in the input path are refused.** `openInput` uses `safefs.OpenRegular`; `redact logs/app.log` where `logs` is a symlink inside untrusted content (a cloned repo, an extracted archive) exits 3 with `symlink refused`. See ADR 0002.
+- **Symlinks anywhere in the input path are refused.** `readInput` opens FILE with `safefs.OpenRegular`; `redact logs/app.log` where `logs` is a symlink inside untrusted content (a cloned repo, an extracted archive) exits 3 with `symlink refused`. See ADR 0002.
 - **Symlinked input files are refused.** Inputs that previously worked through a symlink now exit 3 with `symlink refused`; there is no flag to allow them.
 - **Partial stdout write.** A closed stdout pipe ends the process via SIGPIPE (shell status 141); other write errors, such as a full disk, exit 3. Bytes already written are redacted output, never raw input.
-- **`-o` output file** is not implemented; the temp-file-plus-rename rule applies when it is added.
+- **Breaking default.** `redact FILE` no longer prints; `redact f | cmd` gets empty stdout with exit 0. `-stdout` restores it (ADR 0003).
+- **No `-o PATH`.** The output name is derived; an explicit path is not implemented and would need the `WriteSibling` rules.
+- **Derived name may escape ignore and sync rules** (`.env` becomes `.env_cleaned`), and uncovered secret formats pass through to the file; stderr carries a fixed reminder on every write.
+- **Flags before FILE.** A flag after FILE is a usage error.
