@@ -1,0 +1,242 @@
+---
+title: "Artifact and Finding models: shared types with fail-closed severity, bounded evidence and bounded metadata"
+---
+
+## Outcome
+
+Every future detector, the redact pipeline, the policy engine and the report code share three types: `artifact.Artifact` (with `SourceMetadata`), `finding.Finding` and `finding.Severity`.
+
+- Severity is an ordered integer whose zero value is invalid. `Compare` ranks invalid values highest, for sorting.
+- `AtMost` and `AtLeast` are the threshold checks, and they fail closed when either side is invalid.
+- `Finding.Validate()` rejects an unset severity, evidence over 256 bytes, non-UTF-8 evidence, and metadata that isn't a small set of bounded scalar values.
+- `Artifact.Validate()` applies the same metadata check.
+- Errors never echo content.
+
+There is no I/O and no new dependency. Story: [REDACT-35](http://localhost:8080/issue/REDACT-35). Full spec: `docs/features/artifact-finding-models/spec.md`.
+
+<Code
+  id="example-code"
+  language="go"
+  filename="example (future caller, not part of this story)"
+  code={"f := finding.Finding{\n    ID:         \"script-curl-pipe-sh-1\",\n    Severity:   finding.SeverityHigh,\n    Category:   \"script\",\n    Title:      \"Remote script piped to shell\",\n    ArtifactID: a.ID,\n    File:       a.RelativePath,\n    Line:       12,\n    Evidence:   \"curl <URL_1> | sh\", // already redacted, <= 256 bytes\n    Metadata:   map[string]any{\"rule\": \"curl-pipe-sh\", \"count\": 1},\n}\nif err := f.Validate(); err != nil { /* fail closed: block or error */ }\n\nallowMax, _ := finding.ParseSeverity(\" low \") // trusted config only\nif f.Severity.AtMost(allowMax) { /* allow; false if either side is invalid */ }"}
+/>
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:**
+
+- any I/O (hashing, MIME detection, file reads)
+- the `Scanner` interface, policy engine, report and JSON output
+- typed `SourceMetadata.Type` constants and URI reduction (documented here, implemented in ingest)
+- checking the content of `ID`, `Title`, `Description`, `Category`, `File`, `SHA256` or `URI` (documented contracts only)
+- escaping terminal control and bidi characters (follow-up for the report story)
+- any change to `internal/redactor`, `internal/safefs`, `docs/threat-model.md` or ADRs (REDACT-12 is changing them at the same time)
+
+</Callout>
+
+## Package layout
+
+<Diagram id="package-diagram" frame="show" caption="artifact is a leaf. finding imports artifact only for ValidateMetadata and its limits.">
+
+```html
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">future consumers</div>
+    <div class="diagram-node">scanner (detectors)</div>
+    <div class="diagram-node">redact pipeline</div>
+    <div class="diagram-node">policy engine</div>
+    <div class="diagram-node">report / MCP</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">this story</div>
+    <div class="diagram-box">internal/finding<br/><span class="diagram-muted">Severity, AtMost, AtLeast, ParseSeverity, Finding.Validate</span></div>
+    <div class="diagram-muted" style="text-align:center">imports</div>
+    <div class="diagram-box">internal/artifact (leaf)<br/><span class="diagram-muted">Artifact, SourceMetadata, Validate, ValidateMetadata</span></div>
+  </div>
+</div>
+```
+
+</Diagram>
+
+<FileTree
+  id="file-tree"
+  entries={[
+    { path: "internal/finding/severity.go", change: "added", note: "PR 1. Severity, constants, Valid, String, Compare (rank), AtMost, AtLeast, ParseSeverity, ErrInvalidSeverity" },
+    { path: "internal/finding/severity_test.go", change: "added", note: "PR 1. Order, invalid ranking, thresholds, parse tables, bounded errors" },
+    { path: "docs/architecture.md", change: "modified", note: "PR 1. One section 4 line: finding/ shared Finding/Severity types" },
+    { path: "internal/artifact/artifact.go", change: "added", note: "PR 2. Section 5 fields with untrusted, display-only, SHA256 and URI doc rules" },
+    { path: "internal/artifact/metadata.go", change: "added", note: "PR 2. ValidateMetadata, limits, ErrInvalidMetadata, ErrInvalidArtifact, Artifact.Validate" },
+    { path: "internal/artifact/metadata_test.go", change: "added", note: "PR 2. Allowed scalars, rejected types, bounds, self-reference, no echo" },
+    { path: "internal/artifact/artifact_test.go", change: "added", note: "PR 2. Artifact.Validate wraps both sentinels" },
+    { path: "internal/finding/finding.go", change: "added", note: "PR 2. Finding (section 6), MaxEvidenceBytes, Validate, ErrInvalidFinding, full package contract" },
+    { path: "internal/finding/finding_test.go", change: "added", note: "PR 2. Validate order, bounds, metadata, no echo, no mutation" }
+  ]}
+/>
+
+## Severity: sorting vs threshold checks
+
+<Callout id="threshold-decision" tone="decision">
+
+`Compare` is for sorting. Every invalid value ranks above `SeverityCritical`, and invalid values are equal to each other. It is **not** a threshold check: with an invalid or unset threshold `t`, `s.Compare(t) <= 0` is true for every valid `s`. Allow and deny decisions use `AtMost` (false if either side is invalid) and `AtLeast` (true if either side is invalid).
+
+</Callout>
+
+<AnnotatedCode
+  id="severity-code"
+  filename="internal/finding/severity.go"
+  language="go"
+  code={"type Severity int\n\nconst (\n    SeverityInvalid Severity = iota // zero value: unset or unknown\n    SeverityInfo\n    SeverityLow\n    SeverityMedium\n    SeverityHigh\n    SeverityCritical\n)\n\nfunc (s Severity) Valid() bool { return s >= SeverityInfo && s <= SeverityCritical }\n\nfunc (s Severity) rank() int {\n    if !s.Valid() {\n        return int(SeverityCritical) + 1\n    }\n    return int(s)\n}\n\n// Compare orders for sorting; invalid sorts highest. Not a threshold check.\nfunc (s Severity) Compare(other Severity) int { return cmp.Compare(s.rank(), other.rank()) }\n\nfunc (s Severity) AtMost(max Severity) bool  { return s.Valid() && max.Valid() && s <= max }\nfunc (s Severity) AtLeast(min Severity) bool { return !s.Valid() || !min.Valid() || s >= min }\n\nfunc (s Severity) String() string             // five names, otherwise \"invalid\"\n\n// Trusted configuration only; never call on scanned content.\nfunc ParseSeverity(s string) (Severity, error)"}
+  annotations={[
+    { lines: "4", label: "Zero is invalid", note: "Finding{} gets SeverityInvalid, never info." },
+    { lines: "14-19", label: "Sort rank", note: "Every invalid value ranks Critical+1. Critical.Compare(Invalid) == -1." },
+    { lines: "24-25", label: "Threshold API", note: "Fails closed on either side: Critical.AtMost(Invalid) is false, Info.AtLeast(Invalid) is true." },
+    { lines: "29-30", label: "ASCII-only parse", note: "Trim ASCII whitespace, reject > 64 bytes, reject any byte >= 0x80, then lowercase and match five names. Error quotes at most 32 bytes." }
+  ]}
+/>
+
+## Evidence and metadata: redacted or bounded
+
+<Callout id="evidence-contract" tone="warning">
+
+**Contract (package and field docs).**
+
+- `ID`, `Category`, `Title`, `Description`, `Evidence` and `Metadata` values are constant text or redactor output, never raw scanned content or secrets.
+- `Evidence` is at most 256 bytes and valid UTF-8. `Validate` rejects bad evidence and never truncates.
+- `Validate` cannot detect secrets; the detector is responsible for redaction.
+- Never format a `Finding` or `Artifact` with `%v`, `%+v`, `slog` or JSON into logs or errors. Log `ID` and `Severity.String()` only.
+
+</Callout>
+
+<Table
+  id="validate-table"
+  columns={["Finding.Validate check (in order)", "Error reason (wraps ErrInvalidFinding)"]}
+  rows={[
+    ["!Severity.Valid()", "invalid severity"],
+    ["len(Evidence) > 256", "evidence is N bytes, max 256"],
+    ["!utf8.ValidString(Evidence)", "evidence is not valid UTF-8"],
+    ["artifact.ValidateMetadata(Metadata) fails", "metadata: <reason> (also wraps ErrInvalidMetadata)"]
+  ]}
+/>
+
+<Table
+  id="metadata-table"
+  columns={["ValidateMetadata rule (Artifact and Finding)", "Limit"]}
+  rows={[
+    ["nil or empty map", "accepted"],
+    ["entries", "at most 32"],
+    ["keys", "1-64 bytes, valid UTF-8"],
+    ["value types", "exactly string, bool, int, int64, float64 (type switch; named types fall to default)"],
+    ["string values", "at most 256 bytes, valid UTF-8"],
+    ["rejected", "[]byte, nested maps (including a map that contains itself), slices, pointers, structs, error, nil values, other numeric types"],
+    ["errors", "counts, lengths and %T type names only, never keys or values"]
+  ]}
+/>
+
+## Untrusted field rules (doc comments)
+
+<Table
+  id="field-rules-table"
+  columns={["Field", "Doc rule"]}
+  rows={[
+    ["Artifact.Path", "Open only through internal/safefs"],
+    ["Artifact.RelativePath, Artifact.Name, Finding.File", "Untrusted. Display only. Never join to a directory or pass to a filesystem call. Output code must escape it."],
+    ["Artifact.SHA256", "Not validated here. Check ^[0-9a-f]{64}$ before using it as a path component."],
+    ["SourceMetadata.URI", "Ingest stores only scheme, host and path; drops userinfo, query and fragment; never stores the URL the user typed."],
+    ["Artifact.Metadata", "Read-only after ingest: scanners get Artifact by value and share the map."]
+  ]}
+/>
+
+## Decisions
+
+<Table
+  id="decisions-table"
+  columns={["Decision", "Why", "Rejected"]}
+  rows={[
+    ["New internal/finding package", "Shared by scanner, redact, policy and report; keeps detection separate from policy", "internal/artifact (mixes in non-file models), internal/scanner (policy would depend on scan code)"],
+    ["Severity int, zero = invalid", "A forgotten severity is detectable", "Zero = info (fails open), string type (needs a rank table)"],
+    ["Invalid ranks highest in Compare", "Sorting puts unknowns first", "Invalid lowest (fails open)"],
+    ["AtMost / AtLeast for thresholds", "Compare fails open when the threshold itself is invalid; these check both sides", "Compare plus config validation only"],
+    ["Validate rejects, never truncates, max 256 bytes", "Truncation keeps the secret; rejecting makes the mistake visible", "Documentation only; calling the redactor from finding"],
+    ["Bounded scalar metadata for both types", "Closes the map[string]any side channel past the evidence bound", "Documentation only; dropping Metadata"],
+    ["artifact.ValidateMetadata exported, used by finding", "One implementation, no third package, one doc line", "Two copies (drift); new internal/metadata package"],
+    ["ASCII-only ParseSeverity, 64-byte cap before lowercasing", "Unicode case folding and whitespace can't produce a name", "TrimSpace plus ToLower on any input"],
+    ["No ADR", "Local, no persisted format, no callers yet", "Revisit when policy makes severities configurable"]
+  ]}
+/>
+
+## Implementation: two stacked PRs (about 600 lines)
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size"]}
+  rows={[
+    ["PR 1", "internal/finding/severity.go and tests; docs/architecture.md section 4 line", "about 260 lines"],
+    ["PR 2 (stacked on PR 1)", "internal/artifact (types, metadata, Validate) and tests; internal/finding/finding.go, full package doc and tests", "about 340 lines (if over 500, split artifact plus metadata into its own PR)"]
+  ]}
+/>
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "PR 1: severity.go and severity_test.go", note: "FR3-FR9: values, Valid, String, Compare, AtMost, AtLeast, ParseSeverity, bounded errors." },
+    { id: "step-2", label: "PR 1: docs/architecture.md section 4 line, task verify", note: "FR15." },
+    { id: "step-3", label: "PR 2: internal/artifact artifact.go, metadata.go and tests", note: "FR1, FR10, FR11, FR13 metadata part." },
+    { id: "step-4", label: "PR 2: internal/finding finding.go, package doc, finding_test.go", note: "Depends on step 3. FR2, FR12-FR14." },
+    { id: "step-5", label: "PR 2: task verify", note: "fmt, lint, test, cross, security, secrets." }
+  ]}
+/>
+
+## Tests
+
+<Table
+  id="tests-table"
+  columns={["Area", "Cases"]}
+  rows={[
+    ["Constants, Valid, String", "values 0..5; Valid false for 0, -1, 6, 99, MinInt, MaxInt; \"invalid\" string; ParseSeverity(s.String()) == s"],
+    ["Compare", "25 valid pairs; 0, -1, 99 vs every valid value in both orders; invalid vs invalid gives 0; Critical.Compare(Invalid) == -1"],
+    ["AtMost / AtLeast", "25 valid pairs; Critical.AtMost(Invalid) false; Info.AtLeast(Invalid) true; invalid s vs every t: AtMost false, AtLeast true; valid s vs invalid t: same"],
+    ["ParseSeverity accept", "every name in any ASCII case with ASCII whitespace around it, including \" high\""],
+    ["ParseSeverity reject", "\"\", whitespace, \"invalid\", \"unknown\", \"crit\", \"0\", \"3\", \"hi gh\", \"high\\x00\", \"\\xff\", \"HİGH\", NBSP-padded, full-width, 65 bytes"],
+    ["Bounded parse error", "10 KiB input gives an error under 100 bytes ending in ...; ESC escaped"],
+    ["ValidateMetadata", "each allowed type; 32 entries, 64-byte key and 256-byte value accepted; 33 entries, empty, 65-byte or non-UTF-8 key, 257-byte or non-UTF-8 value, []byte, nested map, slices, pointer, struct, named type, error, nil, int32, uint, float32, self-referencing map rejected"],
+    ["Artifact.Validate", "zero value valid; bad metadata matches ErrInvalidArtifact and ErrInvalidMetadata"],
+    ["Finding.Validate", "baseline; zero and 99 severity; 256/257 bytes; multi-byte 256; \"ok\\xff\"; bad metadata; check order"],
+    ["No echo, no mutation", "runtime-built secret-shaped evidence, keys and values never appear (no 8-byte substring) in errors; finding and its map unchanged"]
+  ]}
+/>
+
+## Risks
+
+<Table
+  id="risks-table"
+  columns={["Risk", "Handling"]}
+  rows={[
+    ["Detector puts a short secret in Evidence, Title, Description or metadata", "Not detectable here. Documented contract, checked by security-reviewer for each detector. Accepted."],
+    ["Caller skips Validate", "Oversize evidence and bad metadata go unnoticed. An invalid finding severity is still denied by AtMost and flagged by AtLeast. Report and policy stories must call Validate."],
+    ["Invalid or unset threshold", "AtMost denies and AtLeast flags. Compare alone would fail open, which its doc says. Policy must also validate thresholds when config loads."],
+    ["Caller uses Compare or raw < for thresholds", "Can fail open. Docs point to AtMost/AtLeast; policy review checks it."],
+    ["Scanner mutates shared Artifact.Metadata", "Documented read-only after ingest; not enforced. Accepted."],
+    ["Merge conflict with REDACT-12", "Only new packages plus one architecture.md line, which REDACT-12 doesn't edit."]
+  ]}
+/>
+
+## Follow-ups (rules from the security design review)
+
+- **Policy:**
+  - Use `AtMost`/`AtLeast` or `Valid()` on both sides. Never compare raw ints.
+  - Validate every threshold when config loads, and refuse to start if one is missing.
+  - Call `Validate` on every finding; an invalid finding leads to block or error.
+  - Never load policy from scanned content.
+  - Record an ADR when severities become configuration.
+- **Report / MCP:**
+  - Call `Validate` on every finding and fail closed.
+  - Escape C0, C1, ESC and bidi characters in `Evidence`, `Title`, `Description`, `File`, `RelativePath`, `Name` and `URI`.
+  - Output only allowlisted metadata keys.
+  - Never reflection-format findings into logs or errors.
+- **Ingest:** reduce URI to scheme, host and path; add typed `Source.Type` constants; treat metadata as read-only once set; set `Path` only from locations `safefs` has checked.
+- **Quarantine:** never use `RelativePath`, `Name` or `File` for filesystem operations; check `SHA256` before using it as a file name.
+- **Detectors:** every `Evidence`, `Title`, `Description` and `Metadata` value is constant text or redactor output; security review checks each detector.
+
+## Definition of done
+
+FR1-FR15 met. `task verify` succeeds on each PR. No changes to `internal/redactor`, `internal/safefs`, `docs/threat-model.md` or ADRs. Each PR uses the template and links the spec. `staff-engineering-reviewer` reports PASS or PASS WITH ADVISORIES, and `security-reviewer` reports PASS, on each PR.

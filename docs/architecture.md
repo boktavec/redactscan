@@ -79,6 +79,7 @@ cmd/sentinel/              CLI entrypoint
 
 internal/
   artifact/                shared artifact/file models
+  finding/                 shared Finding/Severity types
   ingest/                  files, directories, archives, URLs, Git
   scanner/                 scan orchestration + detectors
   parser/                  structured file/project parsers
