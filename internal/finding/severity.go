@@ -1,11 +1,32 @@
-// Package finding holds the types shared by detectors, policy and reports.
+// Package finding holds the types shared by detectors, policy and reports:
+// Finding and Severity.
+//
+// Redacted-or-bounded: ID, Category, Title, Description, Evidence and Metadata
+// keys and values are constant text chosen by the detector or output of
+// internal/redactor, never raw scanned content or secrets. Evidence is a short
+// excerpt of at most MaxEvidenceBytes bytes and valid UTF-8. Detectors redact
+// and shorten before building the finding; Validate never truncates, because
+// truncating a secret does not remove it.
+//
+// Limits of Validate: it cannot detect secrets. It rejects only mistakes it can
+// see: an invalid severity, oversize or non-UTF-8 evidence, and metadata that
+// breaks artifact.ValidateMetadata. Redaction is the detector's job. Title,
+// Description, Category and ID follow the contract but are not checked.
 //
 // Thresholds: use Severity.AtMost and Severity.AtLeast for every allow or deny
 // decision, never Compare or a raw "<" on the integer value. Both methods fail
 // closed when either side is invalid (for example a zero-valued config field).
+// Callers must call Validate on every finding and treat an error as block or
+// error, never allow.
 //
 // ParseSeverity is for trusted configuration and CLI flags only. Never call it
 // on scanned content.
+//
+// No reflection formatting: never format a Finding with %v, %+v, slog
+// attributes or JSON into errors or logs. Log ID and Severity.String() only.
+//
+// Output escaping: strings may contain terminal control and bidi characters;
+// output code must escape them.
 package finding
 
 import (

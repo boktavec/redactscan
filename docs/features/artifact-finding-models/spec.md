@@ -122,7 +122,7 @@ func (a Artifact) Validate() error
 ```
 
 - Check order: entry count first; then, per entry, the key (length, UTF-8), then the value type, then string length and UTF-8. Map iteration order is random, so when several entries are bad, which one is reported can vary. The error never names the key, so this doesn't matter. Tests assert on `errors.Is` plus a substring of the error message, never on which entry is reported.
-- The value check is a plain type switch over `string`, `bool`, `int`, `int64` and `float64`, with `default` rejecting and reporting `value has unsupported kind <reflect.Kind>` (`nil` for a nil value). A type switch doesn't match named types, nil values, `[]byte`, slices, maps or pointers, so they all fall to `default`. There's no recursion, so a self-referencing map is rejected as `map[string]interface {}`.
+- The value check is a plain type switch over `string`, `bool`, `int`, `int64` and `float64`, with `default` rejecting and reporting `value has unsupported kind <reflect.Kind>` (`nil` for a nil value). A type switch doesn't match named types, nil values, `[]byte`, slices, maps or pointers, so they all fall to `default`. There's no recursion, so a self-referencing map is rejected as kind `map`.
 - Error format: `artifact: metadata: <reason>: %w` around `ErrInvalidMetadata`. `Artifact.Validate` wraps again as `artifact: invalid artifact: %w` (using `fmt.Errorf` with two `%w` verbs, or wrapping in sequence, so `errors.Is` works for both sentinels).
 - **Why it's exported from `artifact`.** Both `Artifact` and `Finding` need the same check, and an unexported helper can't be shared across packages. `finding` importing `artifact` follows the natural direction, since findings describe artifacts. It avoids a third package and keeps the architecture doc change to one line. `artifact` stays a leaf with no internal imports.
 
@@ -242,7 +242,7 @@ Future `scanner`, `policy`, `report` and `redactor` code imports these, and neit
 | Metadata limited to bounded scalars for both types (security review F2, user chose option (i)). | `map[string]any` could otherwise carry raw bytes, whole files or nested structures past the evidence bound. | Documentation only: an open side channel. Removing `Metadata`: deviates from the architecture. |
 | `artifact.ValidateMetadata` exported and used by `finding`. | One implementation for both types without a third package or a second architecture doc line. | A copy in each package: the two copies drift. A new `internal/metadata` package: one more package and doc line for about 40 lines of code. |
 | ASCII-only `ParseSeverity` with a 64-byte cap before lowercasing (security review I1). | Unicode case folding and Unicode whitespace can make different-looking strings parse as the same name. | `strings.TrimSpace` plus `strings.ToLower` on arbitrary input. |
-| Errors contain only names, counts, lengths and Go type names. | Evidence and metadata may hold secrets if a detector misbehaves, and errors end up in logs. | Echoing values: leaks exactly what the checks exist to catch. |
+| Errors contain only names, counts, lengths and `reflect.Kind` names. | Evidence and metadata may hold secrets if a detector misbehaves, and errors end up in logs. | Echoing values: leaks exactly what the checks exist to catch. |
 | No ADR. | The decisions are local to two new packages, there's no persisted format and no callers yet. This spec and the section 4 line record them. | ADR now: revisit when the policy engine makes severities user configuration. |
 
 ## 6. Risks and failure modes
@@ -372,7 +372,7 @@ No runtime behavior, logs or metrics; nothing calls these types yet. Deployment 
   - Treat `Metadata` as read-only once set.
   - Set `Path` only from locations that `safefs` has checked.
 - **Quarantine story:** never use `RelativePath`, `Name` or `File` for filesystem operations, and check `SHA256` against `^[0-9a-f]{64}$` before using it as a file name.
-- **Detector stories:** every `Evidence`, `Title`, `Description` and `Metadata` value is constant text or redactor output; `security-reviewer` checks this for each detector.
+- **Detector stories:** every `Evidence`, `Title`, `Description` and `Metadata` key and value is constant text or redactor output (keys should be fixed identifiers); `security-reviewer` checks this for each detector.
 
 ## PR 2 requirements from the security re-review
 
