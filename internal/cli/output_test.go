@@ -95,7 +95,7 @@ func TestRedactWritesCleanedFile(t *testing.T) {
 	in := writeIn(t, dir, "app.log", input)
 	out := filepath.Join(dir, "app_cleaned.log")
 
-	got := run([]string{"redact", "-summary", in}, strings.NewReader(""))
+	got := run([]string{"redact", in}, strings.NewReader(""))
 	wantErr := "redactscan: redacted AWS_ACCESS_KEY=1\n" +
 		"redactscan: wrote " + strconv.Quote(out) + "\n" + noteLine
 	if got != (result{0, "", wantErr}) {
@@ -136,7 +136,7 @@ func TestStdoutAndStdinCreateNoFile(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := run(args, strings.NewReader(input))
-			if got.code != 0 || got.stderr != "" || got.stdout != want {
+			if got.code != 0 || got.stderr != "redactscan: redacted AWS_ACCESS_KEY=1\n" || got.stdout != want {
 				t.Fatalf("got %+v", got)
 			}
 			if names := entries(t, dir); len(names) != 1 {
@@ -290,7 +290,7 @@ func TestHostileFilenameIsQuoted(t *testing.T) {
 	in := writeIn(t, dir, name, awsKey(27))
 	got := run([]string{"redact", in}, strings.NewReader(""))
 	wantOut := strconv.Quote(filepath.Join(dir, cleanedName(name)))
-	if got.code != 0 || got.stderr != "redactscan: wrote "+wantOut+"\n"+noteLine {
+	if got.code != 0 || got.stderr != "redactscan: redacted AWS_ACCESS_KEY=1\nredactscan: wrote "+wantOut+"\n"+noteLine {
 		t.Fatalf("got %+v", got)
 	}
 	for _, raw := range []string{"\x1b", "\u202e"} {
@@ -298,7 +298,7 @@ func TestHostileFilenameIsQuoted(t *testing.T) {
 			t.Errorf("stderr contains raw %q", raw)
 		}
 	}
-	if strings.Count(got.stderr, "\n") != 2 {
+	if strings.Count(got.stderr, "\n") != 3 {
 		t.Errorf("newline in name was not escaped: %q", got.stderr)
 	}
 }
@@ -415,7 +415,7 @@ func TestTempLeftLine(t *testing.T) {
 		code       int
 		wantStderr string
 	}{
-		{"success", nil, 0, "redactscan: wrote " + out + "\n" + noteLine + tempLeftLine},
+		{"success", nil, 0, "redactscan: redacted AWS_ACCESS_KEY=1\nredactscan: wrote " + out + "\n" + noteLine + tempLeftLine},
 		{"failure", syscall.ENOSPC, 3, "redactscan: cannot write " + out + ": no space left\n" + tempLeftLine},
 	}
 	for _, tt := range tests {
@@ -446,5 +446,101 @@ func TestInputInfoComesFromOpenDescriptor(t *testing.T) {
 	assertFailure(t, got, 3, want)
 	if names := entries(t, dir); strings.Join(names, ",") != "app.log,moved.log" {
 		t.Errorf("directory = %v, want no output or temp file", names)
+	}
+}
+
+func TestFileSummaryModes(t *testing.T) {
+	input := marker + " " + awsKey(60) + " " + awsKey(61) + " [AWS_ACCESS_KEY_1]\n"
+	wantOutput := redacted(t, input)
+	tests := []struct {
+		name  string
+		flags []string
+		want  func(out string) string
+	}{
+		{"default", nil, func(out string) string {
+			return "redactscan: redacted AWS_ACCESS_KEY=2; neutralised 1 label-like\nredactscan: wrote " + out + "\n" + noteLine
+		}},
+		{"summary no-op", []string{"-summary"}, func(out string) string {
+			return "redactscan: redacted AWS_ACCESS_KEY=2; neutralised 1 label-like\nredactscan: wrote " + out + "\n" + noteLine
+		}},
+		{"json", []string{"-json"}, func(string) string {
+			return `{"counts":{"AWS_ACCESS_KEY":2,"LABEL_LIKE":1}}` + "\n"
+		}},
+		{"quiet", []string{"--quiet"}, func(string) string { return "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := writeIn(t, dir, "app.log", input)
+			out := filepath.Join(dir, "app_cleaned.log")
+			got := run(append(append([]string{"redact"}, tt.flags...), in), strings.NewReader(""))
+			if want := (result{0, "", tt.want(strconv.Quote(out))}); got != want {
+				t.Fatalf("got %+v, want %+v", got, want)
+			}
+			if c := readFile(t, out); c != wantOutput {
+				t.Errorf("output file = %q", c)
+			}
+		})
+	}
+}
+
+func TestFileFailuresPrintNoSummary(t *testing.T) {
+	for _, fl := range [][]string{nil, {"-json"}, {"-quiet"}, {"-summary"}} {
+		name := strings.Join(fl, "")
+		run3 := func(in string) result {
+			return run(append(append([]string{"redact"}, fl...), in), strings.NewReader(""))
+		}
+		t.Run("refused"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := writeIn(t, dir, "app.log", "a\x00")
+			assertFailure(t, run3(in), 1, "redactscan: redaction refused: unsupported encoding (NUL byte or UTF-16/32)\n")
+			if names := entries(t, dir); len(names) != 1 {
+				t.Errorf("directory = %v", names)
+			}
+		})
+		t.Run("existing destination"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := writeIn(t, dir, "app.log", awsKey(62))
+			writeIn(t, dir, "app_cleaned.log", "keep")
+			out := strconv.Quote(filepath.Join(dir, "app_cleaned.log"))
+			assertFailure(t, run3(in), 3, "redactscan: cannot write "+out+": already exists (use -force to replace)\n")
+		})
+		t.Run("injected write error"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := writeIn(t, dir, "app.log", awsKey(63))
+			stubWriteSibling(t, func(string, fs.FileInfo, string, []byte, bool) (bool, error) { return false, syscall.ENOSPC })
+			out := strconv.Quote(filepath.Join(dir, "app_cleaned.log"))
+			assertFailure(t, run3(in), 3, "redactscan: cannot write "+out+": no space left\n")
+		})
+	}
+}
+
+func TestTempLeftWithSummaryModes(t *testing.T) {
+	dir := t.TempDir()
+	in := writeIn(t, dir, "app.log", awsKey(64))
+	stubWriteSibling(t, func(string, fs.FileInfo, string, []byte, bool) (bool, error) { return true, nil })
+	t.Run("json first, warning last", func(t *testing.T) {
+		got := run([]string{"redact", "-json", in}, strings.NewReader(""))
+		want := result{0, "", `{"counts":{"AWS_ACCESS_KEY":1}}` + "\n" + tempLeftLine}
+		if got != want {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+	t.Run("quiet keeps only the warning", func(t *testing.T) {
+		got := run([]string{"redact", "-quiet", in}, strings.NewReader(""))
+		if want := (result{0, "", tempLeftLine}); got != want {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+}
+
+func TestStdoutIdenticalAcrossFlags(t *testing.T) {
+	input := marker + " " + awsKey(65) + "\n"
+	want := redacted(t, input)
+	for _, fl := range [][]string{nil, {"-summary"}, {"-quiet"}, {"-json"}} {
+		got := run(append(append([]string{"redact"}, fl...), "-"), strings.NewReader(input))
+		if got.code != 0 || got.stdout != want {
+			t.Errorf("%v: got %+v", fl, got)
+		}
 	}
 }

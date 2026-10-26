@@ -125,13 +125,14 @@ Accepted risks: a fatal signal can leave a hidden `.redactscan-*.tmp` with redac
 
 ## CLI (`cmd/redactscan`, `internal/cli`)
 
-`redactscan redact [-summary] [-stdout] [-force] [FILE|-]` runs `redactor.Redact` over a file or stdin. With FILE the result goes to `<name>_cleaned<ext>` beside FILE (mode 0600, no clobber unless `-force`); with stdin, or with `-stdout`, it goes to stdout. See `docs/features/redact-command/spec.md` (superseded for FILE output) and `docs/features/cleaned-file-output/spec.md`.
+`redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]` runs `redactor.Redact` over a file or stdin. With FILE the result goes to `<name>_cleaned<ext>` beside FILE (mode 0600, no clobber unless `-force`); with stdin, or with `-stdout`, it goes to stdout. See `docs/features/redact-command/spec.md` (superseded for FILE output) and `docs/features/cleaned-file-output/spec.md`.
 
 ### Controls
 
 - **Fail closed.** Nothing is created or written until `Redact` succeeds. Stdout receives a single write; the output file appears only through `WriteSibling`. Every non-zero exit leaves nothing written anywhere: stdout is empty and no output or temp file remains (a failed temp removal is reported with a fixed line). A verification failure is a hard stop with no retry.
 - **Bounded read.** At most `MaxInputSize+1` bytes are read (`io.LimitReader`); longer input is refused.
 - **Fixed messages.** Stderr text is built from fixed strings, redactor kind constants and the user-supplied path quoted with `strconv.Quote` (the derived output path is quoted in the typed spelling, never an OS-resolved path). Write errors are mapped by errno or sentinel to a fixed reason. `err.Error()` from the redactor or the OS is never printed, so input bytes cannot reach stderr.
+- **Summary.** Counts by kind on stderr after success only, never values (text and `-json` are built from kind constants and integers); `-quiet` silences success output; `-json` prints counts only; `-quiet` with `-json` is a usage error. No summary is printed on any failure.
 - **Wording.** Help and README never call the output safe; they state that other formats pass through.
 
 ### Exit codes
