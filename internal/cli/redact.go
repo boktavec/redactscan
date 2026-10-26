@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,12 +25,23 @@ const (
 // input between open and write. Production never changes it.
 var writeSibling = safefs.WriteSibling
 
+// summaryMode selects what a successful run prints on stderr.
+type summaryMode int
+
+const (
+	modeText  summaryMode = iota // default
+	modeJSON                     // -json
+	modeQuiet                    // -quiet
+)
+
 const writeNote = "redactscan: note: output may still contain uncovered secret formats\n"
 
 func runRedact(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("redact", flag.ContinueOnError)
 	fl.SetOutput(io.Discard)
-	summary := fl.Bool("summary", false, "")
+	fl.Bool("summary", false, "") // deprecated no-op, kept so existing scripts still parse
+	quiet := fl.Bool("quiet", false, "")
+	jsonOut := fl.Bool("json", false, "")
 	toStdout := fl.Bool("stdout", false, "")
 	force := fl.Bool("force", false, "")
 	if err := fl.Parse(args); err != nil {
@@ -41,6 +53,17 @@ func runRedact(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if fl.NArg() > 1 {
 		return usageError(stderr, "expected at most one FILE argument (flags must come before FILE)")
+	}
+
+	if *quiet && *jsonOut {
+		return usageError(stderr, "-quiet and -json cannot be used together")
+	}
+	mode := modeText
+	switch {
+	case *jsonOut:
+		mode = modeJSON
+	case *quiet:
+		mode = modeQuiet
 	}
 
 	fromStdin := fl.NArg() == 0 || fl.Arg(0) == stdinArg
@@ -57,7 +80,7 @@ func runRedact(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if !fromStdin && !*toStdout {
-		return writeCleaned(path, input, res, *summary, *force, stderr)
+		return writeCleaned(path, input, res, mode, *force, stderr)
 	}
 
 	if len(res.Output) > 0 {
@@ -66,15 +89,36 @@ func runRedact(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return exitIO
 		}
 	}
-	if *summary {
-		_, _ = fmt.Fprintf(stderr, "redactscan: %s\n", summaryText(res.Counts))
-	}
+	printSummary(stderr, mode, res.Counts)
 	return exitOK
+}
+
+// printSummary writes the success summary for mode: nothing for modeQuiet.
+// Write errors are ignored: the output is already written, so a closed stderr
+// must not turn a success into a failure.
+func printSummary(w io.Writer, mode summaryMode, counts map[redactor.Kind]int) {
+	switch mode {
+	case modeText:
+		_, _ = fmt.Fprintf(w, "redactscan: %s\n", summaryText(counts))
+	case modeJSON:
+		if counts == nil {
+			counts = map[redactor.Kind]int{}
+		}
+		// Marshal cannot fail for this type; if it did, print nothing rather
+		// than an error text, since the output was already written.
+		b, err := json.Marshal(struct {
+			Counts map[redactor.Kind]int `json:"counts"`
+		}{counts})
+		if err != nil {
+			return
+		}
+		_, _ = w.Write(append(b, '\n'))
+	}
 }
 
 // writeCleaned writes res.Output beside path (see safefs.WriteSibling) and
 // reports the result on stderr. Called only after Redact succeeded.
-func writeCleaned(path string, input fs.FileInfo, res redactor.Result, summary, force bool, stderr io.Writer) int {
+func writeCleaned(path string, input fs.FileInfo, res redactor.Result, mode summaryMode, force bool, stderr io.Writer) int {
 	dir, base := splitTyped(path)
 	out := strconv.Quote(dir + cleanedName(base))
 	tempLeft, err := writeSibling(path, input, cleanedName(base), res.Output, force)
@@ -85,11 +129,11 @@ func writeCleaned(path string, input fs.FileInfo, res redactor.Result, summary, 
 		_, _ = fmt.Fprintf(stderr, "redactscan: cannot write %s: %s\n", out, writeReason(err, force))
 		return exitIO
 	}
-	if summary {
-		_, _ = fmt.Fprintf(stderr, "redactscan: %s\n", summaryText(res.Counts))
+	printSummary(stderr, mode, res.Counts)
+	if mode == modeText {
+		_, _ = fmt.Fprintf(stderr, "redactscan: wrote %s\n", out)
+		_, _ = io.WriteString(stderr, writeNote)
 	}
-	_, _ = fmt.Fprintf(stderr, "redactscan: wrote %s\n", out)
-	_, _ = io.WriteString(stderr, writeNote)
 	return exitOK
 }
 

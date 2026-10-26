@@ -1,0 +1,117 @@
+---
+title: "Redaction summary on stderr: counts by kind, never values"
+---
+
+## Outcome
+
+Every successful `redactscan redact` run reports how many items of each kind were redacted, on stderr only, so stdout stays pipeable. Values, labels, offsets and paths never appear in the summary. `-json` gives scripts one counts-only object. `-quiet` silences all success output. Story: [REDACT-13](http://localhost:8080/issue/REDACT-13). Full spec: `docs/features/redaction-summary/spec.md`.
+
+<Code
+  id="example-session"
+  filename="terminal"
+  language="text"
+  caption="Default text summary, JSON mode, quiet mode and the flag conflict."
+  code={"$ cat app.log | redactscan redact > clean.log\nredactscan: redacted AWS_ACCESS_KEY=2 GITHUB_TOKEN=1; neutralised 1 label-like\n$ redactscan redact logs/app.log\nredactscan: redacted AWS_ACCESS_KEY=2\nredactscan: wrote \"logs/app_cleaned.log\"\nredactscan: note: output may still contain uncovered secret formats\n$ redactscan redact -json logs/app.log\n{\"counts\":{\"AWS_ACCESS_KEY\":2,\"LABEL_LIKE\":1}}\n$ redactscan redact -quiet logs/app.log     # stderr empty\n$ redactscan redact -quiet -json app.log    # exit 2, usage error\n"}
+/>
+
+<Callout id="breaking-callout" tone="warning">
+
+**Breaking change (accepted by the user).** Today the summary is opt-in through `-summary`, and stream-mode stderr is empty on success. After this change the summary is on by default, so scripts that expect an empty stderr or use `2>&1` see one more line. Use `-quiet` for the old behavior. Stdout does not change in any mode. `-summary` is still accepted and does nothing.
+
+</Callout>
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:**
+
+- offsets, values, labels or the output path in any summary
+- JSON error messages (errors stay plain constant text)
+- a `"version"` field in the JSON
+- any change to `Result.Counts` or to the text summary format
+
+</Callout>
+
+## Stderr contract
+
+<Table
+  id="stderr-table"
+  columns={["Flags", "Stream success (stdin or -stdout)", "File success", "Any failure"]}
+  rows={[
+    ["default or -summary", "summary line", "summary, wrote, note", "constant error line only"],
+    ["-json", "{\"counts\":{...}} line", "{\"counts\":{...}} line (no wrote, no note)", "constant error line only"],
+    ["-quiet", "empty", "empty", "constant error line only"],
+    ["-quiet -json", "exit 2: reason plus usage", "exit 2: reason plus usage", "n/a"]
+  ]}
+/>
+
+`redactscan: temporary file may remain` is never suppressed. When `WriteSibling` reports `tempLeft` it is always the last line, so under `-json` the JSON object is always the first line.
+
+## Decisions
+
+<Table
+  id="decisions-table"
+  columns={["Decision", "Why", "Rejected"]}
+  rows={[
+    ["Summary on by default; -quiet turns it off", "One rule for both modes; matches the story; stdout is never touched", "Opt-in -summary; on by default in file mode only"],
+    ["-quiet hides summary, wrote and note", "Unix -q: success is silent; warnings and errors still print", "Hide only the summary; keep the note"],
+    ["-json prints counts only, nothing else", "One object to parse; no filename escaping; never values", "JSON plus text lines; include the output path"],
+    ["-quiet -json is a usage error", "The flags conflict, so refuse instead of guessing (fail closed)", "Quiet wins; JSON wins"],
+    ["JSON keys are exactly Result.Counts, incl. LABEL_LIKE", "Meets the 'matches Counts exactly' criterion with no CLI-side mapping", "Separate label_like field"]
+  ]}
+/>
+
+## Design
+
+All changes are in `internal/cli`. `runRedact` parses `-quiet`, `-json` and the no-op `-summary`, then rejects the conflict before reading any input. It chooses a summary mode (text, JSON or none) and passes it to the stream path and to `writeCleaned`. A new `printSummary` reuses the existing text formatter. For JSON it marshals `struct{ Counts map[redactor.Kind]int }` with a nil map replaced by `{}`. The summary is printed only after output has been fully written, which is the existing ordering.
+
+**Verified** (`go doc encoding/json Marshal`, Go 1.27.2): string-keyed maps encode with sorted keys and compact output, so the JSON is deterministic.
+
+<FileTree
+  id="files-tree"
+  title="Files touched"
+  entries={[
+    { path: "internal/cli/redact.go", change: "modified", note: "Flags, conflict check, summary mode, printSummary, writeCleaned takes the mode." },
+    { path: "internal/cli/cli.go", change: "modified", note: "Usage text: -quiet, -json, -summary deprecated." },
+    { path: "internal/cli/cli_test.go", change: "modified", note: "Stream-mode expectations and new cases." },
+    { path: "internal/cli/output_test.go", change: "modified", note: "File-mode expectations, failure matrix, tempLeft ordering." },
+    { path: "README.md", change: "modified", note: "Usage and flags." },
+    { path: "docs/threat-model.md", change: "modified", note: "CLI usage line and a summary control bullet." },
+    { path: "docs/features/redact-command/spec.md", change: "modified", note: "FR12 superseded note." },
+    { path: "docs/features/cleaned-file-output/spec.md", change: "modified", note: "FR1 stderr superseded note." }
+  ]}
+/>
+
+## Implementation steps (one PR, about 200 lines)
+
+<Table
+  id="steps-table"
+  columns={["Step", "Change", "Tests"]}
+  rows={[
+    ["1. Summary printing", "Summary mode type and printSummary (text, JSON, none); nil map becomes {}", "Unit: text and JSON for empty, nil, secrets only, label-like only, mixed; JSON decoded equals input map"],
+    ["2. Flags and wiring", "-quiet, -json, -summary no-op, conflict usage error before readInput, stream path and writeCleaned use the mode", "Update old empty-stderr expectations; default, -summary equivalence, -json equals direct Redact Counts, -quiet empty; failure matrix x flags; tempLeft ordering; stdout identical across flags"],
+    ["3. Help and docs", "usageText, README, threat model, superseded notes", "Help test updated"]
+  ]}
+/>
+
+<Callout id="risks-callout" tone="risk">
+
+**Risks:**
+
+- Scripts that expect an empty stderr break. This is an accepted breaking change, and `-quiet` restores the old behavior.
+- A failure to write stderr is ignored and the exit code stays 0, because the output has already been written.
+- Under `-json`, a successful write that leaves a temp file adds a text warning line after the JSON. This is documented.
+
+</Callout>
+
+## Definition of done
+
+<Checklist
+  id="dod-checklist"
+  items={[
+    { id: "fr", label: "FR1-FR10 from the spec implemented with tests in internal/cli", checked: false },
+    { id: "verify", label: "task test and task verify succeed", checked: false },
+    { id: "docs", label: "Usage text, README, threat model and superseded notes updated", checked: false },
+    { id: "review", label: "staff-engineering-reviewer PASS and security-reviewer PASS", checked: false },
+    { id: "pr", label: "PR uses the template, links the spec and REDACT-13, and calls out the breaking stderr change", checked: false }
+  ]}
+/>

@@ -18,7 +18,7 @@ const (
 )
 
 const usageText = `Usage:
-  redactscan redact [-summary] [-stdout] [-force] [FILE|-]
+  redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]
 
 Replaces covered secret formats in FILE (or stdin when FILE is "-" or absent)
 with numbered labels. Covered formats: AWS access keys, AWS secret keys,
@@ -37,8 +37,15 @@ instead (BREAKING: older versions did this by default, so "redact f | cmd"
 now receives nothing). Stdin always goes to stdout. Flags must come before
 FILE.
 
+After success, a one-line count of replaced kinds (never values) is written
+to stderr; stdout is not affected. BREAKING: stdin and -stdout runs used to
+leave stderr empty on success; use -quiet for that.
+
 Options:
-  -summary  write a one-line count of replaced kinds to stderr
+  -quiet    print nothing on stderr on success (errors still print)
+  -json     print only {"counts":{"KIND":N,...}} on stderr on success
+            (-quiet and -json cannot be used together)
+  -summary  deprecated, no effect (the summary is on by default)
   -stdout   write the result to stdout instead of a file (FILE only)
   -force    replace an existing output file (file output only)
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -113,8 +116,9 @@ func TestRedactFileAndStdin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := run(tt.args, tt.stdin)
-			if got.code != 0 || got.stdout != want || got.stderr != "" {
-				t.Fatalf("got %+v, want exit 0, stdout %q, empty stderr", got, want)
+			wantErr := "redactscan: redacted AWS_ACCESS_KEY=1 GITHUB_TOKEN=1\n"
+			if got != (result{0, want, wantErr}) {
+				t.Fatalf("got %+v, want exit 0, stdout %q, stderr %q", got, want, wantErr)
 			}
 		})
 	}
@@ -122,8 +126,8 @@ func TestRedactFileAndStdin(t *testing.T) {
 
 func TestRedactEmptyInput(t *testing.T) {
 	got := run([]string{"redact"}, strings.NewReader(""))
-	if got != (result{}) {
-		t.Fatalf("got %+v, want exit 0 with no output", got)
+	if want := (result{0, "", "redactscan: no covered secret formats found\n"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 
@@ -132,7 +136,7 @@ func TestRedactSizeLimit(t *testing.T) {
 
 	t.Run("exactly the limit", func(t *testing.T) {
 		got := run([]string{"redact"}, strings.NewReader(filler))
-		if got.code != 0 || got.stdout != filler || got.stderr != "" {
+		if got.code != 0 || got.stdout != filler || got.stderr != "redactscan: no covered secret formats found\n" {
 			t.Fatalf("exit = %d, stderr = %q", got.code, got.stderr)
 		}
 	})
@@ -377,7 +381,7 @@ func TestUsageWording(t *testing.T) {
 			t.Errorf("usage text contains %q", banned)
 		}
 	}
-	for _, want := range []string{"AWS", "GitHub", "private keys", "pass through unchanged", "10 MiB", "Exit codes", "-stdout", "-force", "_cleaned", "BREAKING", "before\nFILE"} {
+	for _, want := range []string{"AWS", "GitHub", "private keys", "pass through unchanged", "10 MiB", "Exit codes", "-stdout", "-force", "_cleaned", "BREAKING", "before\nFILE", "-quiet", "-json", "deprecated, no effect", "stderr", "cannot be used together"} {
 		if !strings.Contains(usageText, want) {
 			t.Errorf("usage text lacks %q", want)
 		}
@@ -401,13 +405,210 @@ func TestSummary(t *testing.T) {
 		{"no secrets", []string{"redact", "-summary"}, "plain text", "redactscan: no covered secret formats found\n"},
 		{"label like only", []string{"redact", "-summary"}, "[GITHUB_TOKEN_1]", "redactscan: no covered secret formats found; neutralised 1 label-like\n"},
 		{"secret and label like", []string{"redact", "-summary"}, awsKey(5) + " [AWS_ACCESS_KEY_1]", "redactscan: redacted AWS_ACCESS_KEY=1; neutralised 1 label-like\n"},
-		{"flag absent", []string{"redact"}, awsKey(6), ""},
+		{"flag absent is the same as -summary", []string{"redact"}, awsKey(6), "redactscan: redacted AWS_ACCESS_KEY=1\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := run(tt.args, strings.NewReader(tt.input))
 			if got.code != 0 || got.stderr != tt.want || got.stdout != redacted(t, tt.input) {
 				t.Fatalf("got %+v, want exit 0, stderr %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// decodeCounts decodes a -json stderr line and fails unless it is exactly one
+// {"counts":{...}} object.
+func decodeCounts(t *testing.T, line string) map[redactor.Kind]int {
+	t.Helper()
+	if !strings.HasSuffix(line, "\n") || strings.Count(line, "\n") != 1 {
+		t.Fatalf("want exactly one newline-terminated line, got %q", line)
+	}
+	var v struct {
+		Counts map[redactor.Kind]int `json:"counts"`
+	}
+	dec := json.NewDecoder(strings.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&v); err != nil || v.Counts == nil {
+		t.Fatalf("bad JSON %q: %v", line, err)
+	}
+	return v.Counts
+}
+
+func TestPrintSummary(t *testing.T) {
+	tests := []struct {
+		name     string
+		counts   map[redactor.Kind]int
+		wantText string
+		wantJSON string
+	}{
+		{"nil", nil, "redactscan: no covered secret formats found\n", "{\"counts\":{}}\n"},
+		{"empty", map[redactor.Kind]int{}, "redactscan: no covered secret formats found\n", "{\"counts\":{}}\n"},
+		{"secrets only", map[redactor.Kind]int{redactor.KindGitHubToken: 1, redactor.KindAWSAccessKey: 2},
+			"redactscan: redacted AWS_ACCESS_KEY=2 GITHUB_TOKEN=1\n", "{\"counts\":{\"AWS_ACCESS_KEY\":2,\"GITHUB_TOKEN\":1}}\n"},
+		{"label like only", map[redactor.Kind]int{redactor.KindLabelLike: 3},
+			"redactscan: no covered secret formats found; neutralised 3 label-like\n", "{\"counts\":{\"LABEL_LIKE\":3}}\n"},
+		{"mixed", map[redactor.Kind]int{redactor.KindAWSAccessKey: 1, redactor.KindLabelLike: 1},
+			"redactscan: redacted AWS_ACCESS_KEY=1; neutralised 1 label-like\n", "{\"counts\":{\"AWS_ACCESS_KEY\":1,\"LABEL_LIKE\":1}}\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var b bytes.Buffer
+			printSummary(&b, modeText, tt.counts)
+			if b.String() != tt.wantText {
+				t.Errorf("text = %q, want %q", b.String(), tt.wantText)
+			}
+			b.Reset()
+			printSummary(&b, modeJSON, tt.counts)
+			if b.String() != tt.wantJSON {
+				t.Errorf("json = %q, want %q", b.String(), tt.wantJSON)
+			}
+			want := tt.counts
+			if want == nil {
+				want = map[redactor.Kind]int{}
+			}
+			if got := decodeCounts(t, b.String()); !reflect.DeepEqual(got, want) {
+				t.Errorf("decoded %v, want %v", got, want)
+			}
+			b.Reset()
+			printSummary(&b, modeQuiet, tt.counts)
+			if b.Len() != 0 {
+				t.Errorf("quiet printed %q", b.String())
+			}
+		})
+	}
+}
+
+func TestStreamSummaryModes(t *testing.T) {
+	inputs := []string{
+		"plain text",
+		awsKey(40) + " " + awsKey(41) + " " + ghToken(42),
+		"[GITHUB_TOKEN_1]",
+		awsKey(43) + " [AWS_ACCESS_KEY_1]",
+	}
+	for _, input := range inputs {
+		want, err := redactor.Redact([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := run([]string{"redact"}, strings.NewReader(input))
+		wantText := "redactscan: " + summaryText(want.Counts) + "\n"
+		if base != (result{0, string(want.Output), wantText}) {
+			t.Fatalf("default: got %+v", base)
+		}
+		for _, flag := range []string{"-summary", "--summary"} {
+			if got := run([]string{"redact", flag}, strings.NewReader(input)); got != base {
+				t.Errorf("%s: got %+v, want %+v", flag, got, base)
+			}
+		}
+		for _, flag := range []string{"-quiet", "--quiet"} {
+			if got := run([]string{"redact", flag}, strings.NewReader(input)); got != (result{0, base.stdout, ""}) {
+				t.Errorf("%s: got %+v", flag, got)
+			}
+		}
+		for _, flag := range []string{"-json", "--json"} {
+			got := run([]string{"redact", flag}, strings.NewReader(input))
+			if got.code != 0 || got.stdout != base.stdout {
+				t.Fatalf("%s: got %+v", flag, got)
+			}
+			counts := decodeCounts(t, got.stderr)
+			wantCounts := want.Counts
+			if wantCounts == nil {
+				wantCounts = map[redactor.Kind]int{}
+			}
+			if !reflect.DeepEqual(counts, wantCounts) {
+				t.Errorf("%s: counts %v, want %v", flag, counts, wantCounts)
+			}
+			for _, secret := range []string{awsKey(40), ghToken(42), "GITHUB_TOKEN_1"} {
+				if strings.Contains(got.stderr, secret) {
+					t.Errorf("%s: stderr contains input text %q", flag, secret)
+				}
+			}
+		}
+	}
+}
+
+func TestStdoutFlagSummaryModes(t *testing.T) {
+	input := awsKey(44) + " " + ghToken(45)
+	path := writeTemp(t, input)
+	want, err := redactor.Redact([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"-json", "-quiet"} {
+		got := run([]string{"redact", flag, "-stdout", path}, strings.NewReader(""))
+		if got.code != 0 || got.stdout != string(want.Output) {
+			t.Fatalf("%s: got %+v", flag, got)
+		}
+		if flag == "-quiet" {
+			if got.stderr != "" {
+				t.Errorf("-quiet stderr = %q", got.stderr)
+			}
+		} else if counts := decodeCounts(t, got.stderr); !reflect.DeepEqual(counts, want.Counts) {
+			t.Errorf("-json counts %v, want %v", counts, want.Counts)
+		}
+	}
+}
+
+func TestJSONSummaryExactBytes(t *testing.T) {
+	input := ghToken(50) + " " + awsKey(51) + " " + awsKey(52) + " [AWS_ACCESS_KEY_1]"
+	got := run([]string{"redact", "-json"}, strings.NewReader(input))
+	want := `{"counts":{"AWS_ACCESS_KEY":2,"GITHUB_TOKEN":1,"LABEL_LIKE":1}}` + "\n"
+	if got.stderr != want {
+		t.Errorf("stderr = %q, want %q", got.stderr, want)
+	}
+}
+
+// failIfRead fails the test when read: the conflict check must run before any input is read.
+type failIfRead struct{ t *testing.T }
+
+func (r failIfRead) Read([]byte) (int, error) {
+	r.t.Error("stdin was read before the -quiet/-json conflict was rejected")
+	return 0, io.EOF
+}
+
+func TestQuietJSONConflict(t *testing.T) {
+	path := writeTemp(t, awsKey(53))
+	dir := filepath.Dir(path)
+	for _, args := range [][]string{
+		{"redact", "-quiet", "-json"},
+		{"redact", "-json", "-quiet"},
+		{"redact", "--quiet", "--json", path},
+		{"redact", "-json", "-stdout", "-quiet", path},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			got := run(args, failIfRead{t})
+			want := "redactscan: -quiet and -json cannot be used together\n" + usageText
+			if got != (result{2, "", want}) {
+				t.Fatalf("got %+v", got)
+			}
+			if names := entries(t, dir); len(names) != 1 {
+				t.Errorf("directory = %v, want input only", names)
+			}
+		})
+	}
+}
+
+// Every failing exit prints only its constant error line, whatever the
+// output flags.
+func TestStreamFailuresPrintNoSummary(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	flags := [][]string{nil, {"-json"}, {"-quiet"}, {"-summary"}}
+	for _, fl := range flags {
+		name := strings.Join(fl, "")
+		t.Run("refused"+name, func(t *testing.T) {
+			got := run(append(append([]string{"redact"}, fl...), "-"), strings.NewReader("a\x00"))
+			assertFailure(t, got, 1, "redactscan: redaction refused: unsupported encoding (NUL byte or UTF-16/32)\n")
+		})
+		t.Run("missing"+name, func(t *testing.T) {
+			got := run(append(append([]string{"redact"}, fl...), missing), strings.NewReader(""))
+			assertFailure(t, got, 3, "redactscan: cannot open "+strconv.Quote(missing)+": not found\n")
+		})
+		t.Run("stdout write"+name, func(t *testing.T) {
+			var errb bytes.Buffer
+			code := Run(append(append([]string{"redact"}, fl...), "-"), strings.NewReader(awsKey(54)), failWriter{}, &errb)
+			if want := "redactscan: cannot write output: write failed\n"; code != 3 || errb.String() != want {
+				t.Errorf("exit %d, stderr %q", code, errb.String())
 			}
 		})
 	}
