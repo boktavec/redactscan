@@ -61,6 +61,11 @@ func (r *Registry) Run(ctx context.Context, a artifact.Artifact, content []byte)
 
 		res.Ran++
 		for _, f := range found {
+			// The cap comes first so a flood costs no per-finding work.
+			if len(res.Findings) >= MaxFindings {
+				record(e.name, ReasonTooManyFindings)
+				break
+			}
 			if !checkFinding(f, a) {
 				record(e.name, ReasonInvalidFinding)
 				continue
@@ -93,12 +98,6 @@ func call(f func()) bool {
 		completed = true
 	}()
 	return <-done
-}
-
-// checkFinding reports whether f may be accepted for artifact a. PR 1b
-// replaces it with the full bounds and redactor checks (check.go).
-func checkFinding(f finding.Finding, a artifact.Artifact) bool {
-	return f.Validate() == nil && f.ArtifactID == a.ID
 }
 
 // sortFindings orders by severity descending, then by identifying fields

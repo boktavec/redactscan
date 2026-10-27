@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -356,15 +357,63 @@ func TestRunPanicIsolation(t *testing.T) {
 	}
 }
 
-func TestRunDropsInvalidFindingsOneByOne(t *testing.T) {
-	badSeverity := fnd("bad1", finding.SeverityInvalid)
-	otherArtifact := fnd("bad2", finding.SeverityHigh)
-	otherArtifact.ArtifactID = "file-2"
-	s := &fake{name: "s", findings: []finding.Finding{badSeverity, fnd("kept", finding.SeverityLow), otherArtifact}}
-	res := run(t, s)
-	assertFailures(t, res, Failure{"s", ReasonInvalidFinding}) // once for two bad findings
-	if got := ids(res.Findings); !reflect.DeepEqual(got, []string{"kept"}) {
-		t.Errorf("findings = %v", got)
+func TestRunFindingsCap(t *testing.T) {
+	many := func(prefix string, n int) []finding.Finding {
+		out := make([]finding.Finding, n)
+		for i := range out {
+			out[i] = fnd(fmt.Sprintf("%s%04d", prefix, i), finding.SeverityLow)
+		}
+		return out
+	}
+
+	t.Run("exactly the cap", func(t *testing.T) {
+		res := run(t, &fake{name: "a", findings: many("a", MaxFindings)})
+		if res.Incomplete() || len(res.Findings) != MaxFindings {
+			t.Errorf("failures=%v findings=%d", res.Failures, len(res.Findings))
+		}
+	})
+
+	t.Run("one over the cap", func(t *testing.T) {
+		res := run(t, &fake{name: "a", findings: many("a", MaxFindings+1)})
+		assertFailures(t, res, Failure{"a", ReasonTooManyFindings})
+		if len(res.Findings) != MaxFindings {
+			t.Errorf("findings = %d", len(res.Findings))
+		}
+		if got := ids(res.Findings); got[len(got)-1] != fmt.Sprintf("a%04d", MaxFindings-1) {
+			t.Errorf("kept the wrong findings, last = %s", got[len(got)-1])
+		}
+	})
+
+	t.Run("first in registry order win, scanners still run", func(t *testing.T) {
+		a := &fake{name: "a", findings: many("a", MaxFindings)}
+		b := &fake{name: "b", findings: many("b", 3)}
+		res := run(t, a, b)
+		assertFailures(t, res, Failure{"b", ReasonTooManyFindings})
+		if b.scans != 1 || len(res.Findings) != MaxFindings || res.Ran != 2 {
+			t.Errorf("scans=%d findings=%d ran=%d", b.scans, len(res.Findings), res.Ran)
+		}
+		for _, id := range ids(res.Findings) {
+			if strings.HasPrefix(id, "b") {
+				t.Fatalf("finding %s from the later scanner was kept", id)
+			}
+		}
+	})
+}
+
+func TestRunFindingsCapSkipsPerFindingChecks(t *testing.T) {
+	// Findings past the cap are invalid. If they were still checked, the
+	// scanner would also get an "invalid finding" failure.
+	found := make([]finding.Finding, 0, MaxFindings+100_000)
+	for i := 0; i < MaxFindings; i++ {
+		found = append(found, fnd(fmt.Sprintf("a%04d", i), finding.SeverityLow))
+	}
+	for i := 0; i < 100_000; i++ {
+		found = append(found, finding.Finding{})
+	}
+	res := run(t, &fake{name: "a", findings: found})
+	assertFailures(t, res, Failure{"a", ReasonTooManyFindings})
+	if len(res.Findings) != MaxFindings {
+		t.Errorf("findings = %d", len(res.Findings))
 	}
 }
 
