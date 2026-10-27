@@ -19,6 +19,7 @@ const (
 
 const usageText = `Usage:
   redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]
+  redactscan scan FILE
 
 Replaces covered secret formats in FILE (or stdin when FILE is "-" or absent)
 with numbered labels. Covered formats: AWS access keys, AWS secret keys,
@@ -49,7 +50,15 @@ Options:
   -stdout   write the result to stdout instead of a file (FILE only)
   -force    replace an existing output file (file output only)
 
-Exit codes:
+scan reads FILE (never executes it) through the same symlink-refusing open as
+redact and runs every registered scanner over it, printing one stdout line per
+finding: SEVERITY "ID" "FILE"[:LINE] "TITLE". Failure lines and a summary go
+to stderr.
+Files over 10 MiB are not scanned. The output format and the scan exit codes
+(0 complete, 1 incomplete, 2 usage, 3 I/O error) are provisional. No scanners
+are registered yet, so scans report incomplete until scanners are added.
+
+Exit codes (redact):
   0  success, or help requested
   1  redaction refused (too large, unsupported encoding, output could not be
      verified, or internal error); nothing is written to stdout or to a file
@@ -70,6 +79,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitOK
 	case "redact":
 		return runRedact(args[1:], stdin, stdout, stderr)
+	case "scan":
+		return runScan(args[1:], stdout, stderr)
 	default:
 		return usageError(stderr, fmt.Sprintf("unknown command %q", args[0]))
 	}

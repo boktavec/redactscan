@@ -1,6 +1,6 @@
 # ADR 0004: Scanner contract, with content passed in and per-scanner isolation
 
-Status: Proposed (accepted when REDACT-36 PR 2 merges)
+Status: Accepted (REDACT-36)
 Date: 2026-10-26
 Spec: `docs/features/scanner-scan-file/spec.md`
 
