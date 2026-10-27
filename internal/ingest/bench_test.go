@@ -47,6 +47,7 @@ func BenchmarkWalkLongPaths(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	defer func() { _ = r.Close() }() // closes the current level, also on b.Fatal
 	remaining := maxPath - (len(root) + 1)
 	for remaining > 255 { // leave a file name of at most 255 bytes
 		dir := strings.Repeat("d", 100)
@@ -68,7 +69,6 @@ func BenchmarkWalkLongPaths(b *testing.B) {
 		}
 		_ = f.Close()
 	}
-	_ = r.Close()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {

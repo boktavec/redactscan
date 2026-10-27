@@ -159,8 +159,9 @@ Classification uses `top.Stat(rel)` on the **top** root with the slash-joined re
 - **Mount points:** the walk crosses them. Scanning `/` lists `/proc/self/environ` as a regular file (listed only, never read here) and skips `/dev` devices.
 - **No timeout:** a hung network filesystem can block the walk.
 - **Budget cut inside a directory:** which entries are kept depends on filesystem order. The walk is reported incomplete.
-- **Memory:** worst case about 130 MiB (100,000 Artifacts at about 1.3 KiB with 1024-byte paths; **Assumed**). The benchmark records the measured cost.
-- **Descriptors:** at most `MaxDepth + 2`. `MaxDepth` near the 256 cap can hit the macOS default soft limit (**Assumed** 256). That surfaces as a read error and an incomplete walk, not a crash.
+- **Memory:** worst case about 215 MB allocated and about 126 MiB retained for 100,000 Artifacts with 1015-byte paths (**Verified** by benchmark: about 1.04 KiB allocated per short-path Artifact, about 2.1 KiB at maximum length; retained about 275 B per short-path Artifact, the 126 MiB is extrapolated).
+- **Symlink classification CPU (user-accepted):** `Root.Stat` costs one `openat` per target component over up to 8 chained links, bounded by target length times hops and not by `MaxDepth` or `MaxEntries`. Hostile deep links were measured at about 4,500x (macOS) and about 80x (Linux) a short link. No timeout or step budget now; a classification step budget is the recommended hardening before untrusted uploads or MCP. See the threat model.
+- **Descriptors:** at most `MaxDepth + 2` (briefly `MaxDepth + 4` while classifying a symlink; an `EMFILE` there gives `unknown`, errno 24, and does not make the walk incomplete). `MaxDepth` near the 256 cap can hit the macOS default soft limit (**Assumed** 256). That surfaces as a read error and an incomplete walk, not a crash.
 
 </Callout>
 
