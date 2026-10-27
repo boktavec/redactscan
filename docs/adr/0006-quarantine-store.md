@@ -17,7 +17,7 @@ Scan decisions `review` and `block` need somewhere inert to keep the content: no
 4. **Strict validation on every read, re-hash only in `Verify` (D6).**
 5. **Atomic publish with no-replace links (D7).** The ID is reserved with an exclusive `Mkdir`; `content` and then `metadata.json` are placed with `Root.Link`, which refuses an existing name. An entry is complete only when `metadata.json` exists. A plain `Rename` would replace an existing file and a temporary directory plus rename needs per-OS no-replace syscalls.
 6. **Store budget checked before any write (D8).** Not serialized across processes (accepted below).
-7. **Name and URI are redactor-checked on Put and refused on a hit (D9).** Redacting would silently change the record. URI userinfo, query and fragment are refused.
+7. **Name and URI are redactor-checked on Put and refused on a hit (D9).** Redacting would silently change the record. A URI must be empty or `https`, `http` or `file` with no userinfo, opaque part, `?` or `#` (the opaque form `https:user:pw@host` carries credentials that `url.Parse` does not report as `User`).
 8. **euid 0 is refused unless `Options.AllowRoot` (D10).** A root-owned store under a user home breaks the ownership model.
 9. **`encoding/json/v2` for strict decode (D11), typed finding metadata encoding (D12).** No new dependency.
 10. **Fixed-text errors.** No path, ID, name, URI, finding text or OS error text; OS errors unwrap to a bare `syscall.Errno`.

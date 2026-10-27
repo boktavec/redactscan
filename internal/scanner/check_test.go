@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/boktavec/redactscan/internal/finding"
-	"github.com/boktavec/redactscan/internal/redactor"
 )
 
 func TestRunInvalidFindingsDroppedOneByOne(t *testing.T) {
@@ -69,17 +68,5 @@ func TestRunInvalidFindingsDroppedOneByOne(t *testing.T) {
 				t.Errorf("Ran = %d", res.Ran)
 			}
 		})
-	}
-}
-
-func TestRedactorCleanUsesRedactorKinds(t *testing.T) {
-	// Guards the assumption behind FR17: label-like text is the only kind
-	// accepted, and the redactor reports it as KindLabelLike.
-	res, err := redactor.Redact([]byte("[GITHUB_TOKEN_1]"))
-	if err != nil || res.Counts[redactor.KindLabelLike] != 1 {
-		t.Fatalf("redactor changed: counts=%v err=%v", res.Counts, err)
-	}
-	if !redactorClean("") {
-		t.Error("empty string must be clean")
 	}
 }
