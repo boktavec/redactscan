@@ -1,0 +1,9 @@
+title = "redactscan gitleaks config"
+
+[extend]
+useDefault = true
+
+# Deliberate fake secrets used as redaction samples; they must stay detectable by the redactor.
+[[allowlists]]
+description = "manual redaction sample fixtures"
+paths = ['''^testdata/manual-samples/''']
