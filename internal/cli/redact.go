@@ -233,6 +233,8 @@ func refusalReason(err error) string {
 		return "input exceeds 10 MiB limit"
 	case errors.Is(err, redactor.ErrUnsupportedEncoding):
 		return "unsupported encoding (NUL byte or UTF-16/32)"
+	case errors.Is(err, redactor.ErrUnknownKind):
+		return "invalid redaction options"
 	case errors.As(err, &ve):
 		return "output could not be verified (kind: " + string(ve.Kind) + ")"
 	case errors.Is(err, redactor.ErrVerificationFailed):

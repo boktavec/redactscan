@@ -190,6 +190,7 @@ func TestRefusalReasonMapping(t *testing.T) {
 	}{
 		{"typed verification", &redactor.VerificationError{Kind: redactor.KindPrivateKey}, "output could not be verified (kind: PRIVATE_KEY)"},
 		{"sentinel only", redactor.ErrVerificationFailed, "output could not be verified (kind: unknown)"},
+		{"unknown kind", redactor.ErrUnknownKind, "invalid redaction options"},
 		{"other error", errors.New("contains " + marker), "internal error"},
 	}
 	for _, tt := range tests {

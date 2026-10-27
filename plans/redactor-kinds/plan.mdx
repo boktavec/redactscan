@@ -1,0 +1,149 @@
+---
+title: "Redactor kind selection: redact or refuse, never pass through"
+---
+
+## Outcome
+
+A profile author can choose which secret kinds `internal/redactor` redacts. For each covered kind, the choice is binary: **selected** kinds are redacted to labels as today, and input containing an **unselected** kind is **refused** as a whole. Selection never reduces detection or verification, and on success the output is byte-identical to `Redact`. Story: REDACT-16. Full spec: `docs/features/redactor-kinds/spec.md`.
+
+<Code
+  id="example-usage"
+  filename="example.go"
+  language="go"
+  caption="A profile that redacts tokens and AWS keys but refuses any input with a private key."
+  code={"res, err := redactor.RedactWith(input, redactor.Options{\n\tKinds: []redactor.Kind{redactor.KindAWSAccessKey, redactor.KindAWSSecretKey, redactor.KindGitHubToken},\n})\n// input with a PEM private key   -> *VerificationError{Kind: PRIVATE_KEY}, zero Result\n// input with only a GitHub token -> success, Output == Redact(input).Output\n// Kinds: []Kind{\"LABEL_LIKE\"}     -> ErrUnknownKind (checked before size/encoding)\n"}
+/>
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:**
+
+- passing an unselected kind through, or relaxing the verifier for it
+- a distinct "kind not selected" error (security R6, follow-up)
+- profiles, config files, CLI flags or MCP exposure of selection
+- exported kind lists, a `ParseKind` helper, or new detectors
+
+</Callout>
+
+## Design
+
+`Redact(input)` becomes `RedactWith(input, Options{})`. Nil or empty `Kinds` means all four secret kinds. `RedactWith` first validates the options and copies them into a fixed four-entry set. It then runs the existing size and encoding checks and the full, unchanged `detect()`. Next, it checks the **raw** spans for any unselected secret kind, **before** `mergeSpans`, which overwrites its slice and hides nested kinds. Only then do the unchanged merge, render and verify steps run.
+
+<Diagram id="flow-diagram" caption="RedactWith pipeline. Only the dashed step is new; every other stage is unchanged and always runs in full.">
+
+```html
+<div class="diagram-panel" data-rough>
+  <div class="diagram-node">validate + copy Kinds<br/><span class="diagram-muted">ErrUnknownKind</span></div>
+  <div class="diagram-node">size / encoding<br/><span class="diagram-muted">unchanged</span></div>
+  <div class="diagram-node">detect()<br/><span class="diagram-muted">all detectors, PEM, labels</span></div>
+  <div class="diagram-node new">checkSelected(raw spans)<br/><span class="diagram-muted">VerificationError{Kind}</span></div>
+  <div class="diagram-node">mergeSpans + render<br/><span class="diagram-muted">unchanged</span></div>
+  <div class="diagram-node">verify<br/><span class="diagram-muted">unchanged, all checks</span></div>
+</div>
+```
+
+```css
+.diagram-panel { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.diagram-node { padding: 8px 12px; text-align: center; }
+.diagram-node.new { border-style: dashed; border-color: var(--wf-accent); }
+```
+
+</Diagram>
+
+<Callout id="nested-callout" tone="risk">
+
+**Why the check runs on raw spans.** A `ghp_` token whose tail contains `AKIA` + 16 characters matches two detectors. Filtering unselected spans before render would emit `ghp_[AWS_ACCESS_KEY_1]...`. That is below the verifier's GitHub threshold, so part of a real token would leak silently. Rejecting any unselected raw span closes this. The cost is one accepted false failure: with `Kinds=[PRIVATE_KEY]`, a PEM body containing an `AKIA` run is refused as `AWS_ACCESS_KEY`.
+
+</Callout>
+
+## Requirements
+
+<Table
+  id="fr-table"
+  columns={["ID", "Requirement", "Acceptance"]}
+  rows={[
+    ["FR1", "Redact unchanged", "Existing tests pass unmodified; Redact delegates to RedactWith(x, Options{})"],
+    ["FR2", "Default selection", "nil, empty and all-four Kinds are identical to Redact (output, counts, error) on every fixture"],
+    ["FR3", "Validation", "Only the four secret kind names, case-sensitive; LABEL_LIKE, \"\", lowercase and EMAIL are rejected; duplicates are OK"],
+    ["FR4", "Validation first", "Invalid options plus oversize or NUL input return ErrUnknownKind"],
+    ["FR5", "Constant error", "\"redactor: unknown kind\", with no value or index"],
+    ["FR6", "Refuse unselected", "Any raw detect() span of an unselected kind returns VerificationError{Kind} and a zero Result, before render"],
+    ["FR7", "Nested (R2)", "AKIA inside a ghp_ tail: Kinds=[GITHUB_TOKEN] fails with AWS_ACCESS_KEY; Kinds=[AWS_ACCESS_KEY] fails with GITHUB_TOKEN"],
+    ["FR8", "Detection always full (R1)", "Kinds=[GITHUB_TOKEN] with aws_secret_access_key and more than 16 spaces or tabs around the separator fails with AWS_SECRET_KEY"],
+    ["FR9", "Fixed order", "AWS_ACCESS_KEY, AWS_SECRET_KEY, GITHUB_TOKEN, PRIVATE_KEY"],
+    ["FR10", "Verifier unchanged", "All looseChecks and the label check run on every render"],
+    ["FR11", "Labels independent (R3)", "A forged [PRIVATE_KEY_1] with Kinds=[GITHUB_TOKEN] succeeds, is neutralised, and increments Counts[LABEL_LIKE]"],
+    ["FR12", "Caller slice safe (R4)", "Copied at call start, never mutated or retained; the doc comment covers goroutine sharing"],
+    ["FR13", "Success equals Redact (R7)", "Fuzz: either an error with a zero Result, or output identical to Redact with Counts keys within S plus LABEL_LIKE; never success when Redact errors"],
+    ["FR14", "CLI mapping (R5)", "refusalReason maps ErrUnknownKind to \"invalid redaction options\" and never prints err.Error()"]
+  ]}
+/>
+
+## Decisions
+
+<Table
+  id="decisions-table"
+  columns={["Decision", "Why", "Rejected"]}
+  rows={[
+    ["Unselected means refuse; the verifier is never relaxed (user)", "Selection cannot weaken the safety net (ADR 0001, fail-closed)", "Pass-through with the verifier skipping the kind; selection only for future non-secret kinds"],
+    ["Nil or empty Kinds means all kinds (user)", "The safe zero value; Redact is RedactWith(x, Options{})", "An error for empty Kinds; 'no kinds' meaning refuse-everything"],
+    ["Reject on raw spans before merge (user, security R2)", "Closes nested-span and fragment leaks with one total rule", "Filtering before merge (leaks); tracking constituents through merge (complex)"],
+    ["Reuse VerificationError{Kind} (user)", "No new CLI path; a distinct error waits for profiles", "ErrKindNotSelected now (R6, follow-up)"],
+    ["Constant ErrUnknownKind, validated first", "Deterministic config errors; never echo config or input", "Echoing the bad name; checking input first"]
+  ]}
+/>
+
+ADR 0004 (`docs/adr/0004-kind-selection-refuses-never-passes-through.md`) records the redact-or-refuse semantics, because future profile, config and MCP work depends on them.
+
+<FileTree
+  id="files-tree"
+  title="Files touched"
+  entries={[
+    { path: "internal/redactor/redactor.go", change: "modified", note: "Options, ErrUnknownKind, RedactWith, secretKinds, kindSet, checkSelected; Redact delegates." },
+    { path: "internal/redactor/options_test.go", change: "added", note: "FR2-FR12 table tests." },
+    { path: "internal/redactor/robustness_test.go", change: "modified", note: "FuzzRedactWith oracle (FR13) and a shared-Options concurrency test." },
+    { path: "internal/cli/redact.go", change: "modified", note: "refusalReason case for ErrUnknownKind." },
+    { path: "internal/cli/cli_test.go", change: "modified", note: "refusalReason table row." },
+    { path: "docs/threat-model.md", change: "modified", note: "Selection control, R2 accepted risk, caller constraints." },
+    { path: "docs/adr/0004-kind-selection-refuses-never-passes-through.md", change: "added", note: "Redact-or-refuse decision." },
+    { path: "docs/architecture.md", change: "modified", note: "Section 14 note: excluding a kind refuses input." },
+    { path: "docs/features/redactor-kinds/spec.md", change: "added", note: "This spec." }
+  ]}
+/>
+
+## Implementation steps
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "1. API and validation: Options, ErrUnknownKind, RedactWith (validate, then behave like Redact); Redact delegates", note: "Tests: FR2 equivalence, FR3 table, FR4 order, FR5 text, FR12 slice unchanged. Existing tests pass unmodified." },
+    { id: "step-2", label: "2. checkSelected on raw detect() spans before mergeSpans", note: "Depends on 1. Tests: each kind alone, FR7 nested both ways, FR8 long whitespace, FR9 order, FR11 forged label, the pinned R2 false failure, a PEM containing a token." },
+    { id: "step-3", label: "3. FuzzRedactWith oracle and a shared-Options concurrency test", note: "Depends on 2. Run -fuzztime 60s once locally and note it in the PR." },
+    { id: "step-4", label: "4. CLI refusalReason mapping, threat model, ADR 0004, architecture note", note: "Depends on 2. task verify passes." }
+  ]}
+/>
+
+## Security and risks
+
+<Table
+  id="risk-table"
+  columns={["Risk", "Mitigation"]}
+  rows={[
+    ["Partial leak of an unselected token cut by a selected span", "Raw-span rejection (FR6, FR7) and the fuzz oracle (FR13)"],
+    ["Selection disables a detector or check", "Only checkSelected reads the selection; FR8 and FR10 tests"],
+    ["A caller retries with a different selection to get past a refusal", "Forbidden in the threat model; deselecting a detected kind also refuses"],
+    ["More false failures", "Accepted and documented; the error names the kind"],
+    ["Error text leaks config or input", "Constant sentinel; fixed CLI strings"],
+    ["Caller mutates Kinds during a call", "Copied at call start; the doc comment covers sharing"]
+  ]}
+/>
+
+No new dependency, persisted data or CLI behaviour change: no caller passes options yet. Rollback is a revert.
+
+## Definition of done
+
+- FR1-FR14 are tested.
+- `task test` and `task verify` pass.
+- The threat model, ADR 0004 and architecture section 14 are updated.
+- `staff-engineering-reviewer` reports PASS (or PASS WITH ADVISORIES), and `security-reviewer` reports PASS.
+- The PR follows `.github/pull_request_template.md` and links the spec and ADR.
