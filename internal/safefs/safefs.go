@@ -20,6 +20,7 @@ var (
 	ErrUnsupportedPlatform = errors.New("safefs: unsupported platform")
 	ErrInvalidName         = errors.New("safefs: invalid output name")
 	ErrTempNames           = errors.New("safefs: no free temporary name")
+	ErrNotOwned            = errors.New("safefs: file not owned by the current user")
 )
 
 // FileType names the kind of non-regular file that was refused.
