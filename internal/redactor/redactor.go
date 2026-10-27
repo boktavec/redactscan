@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
+	"slices"
 	"strconv"
 )
 
@@ -37,6 +38,9 @@ var (
 	ErrInputTooLarge       = errors.New("redactor: input exceeds maximum size")
 	ErrUnsupportedEncoding = errors.New("redactor: unsupported encoding")
 	ErrVerificationFailed  = errors.New("redactor: verification failed")
+	// ErrUnknownKind reports an Options.Kinds entry that is not a secret
+	// kind. It never names the rejected value.
+	ErrUnknownKind = errors.New("redactor: unknown kind")
 )
 
 // Result is the outcome of a successful Redact call. Both fields are nil
@@ -56,6 +60,52 @@ type span struct {
 	kind       Kind
 }
 
+// secretKinds are the kinds a caller can select, in the fixed order used
+// for validation and for choosing which kind a refusal names.
+var secretKinds = [...]Kind{KindAWSAccessKey, KindAWSSecretKey, KindGitHubToken, KindPrivateKey}
+
+// kindSet is a set of secret kinds, indexed like secretKinds.
+type kindSet [len(secretKinds)]bool
+
+// newKindSet validates kinds against secretKinds (exact, case-sensitive
+// match). Nil or empty selects every kind. Duplicates count once.
+func newKindSet(kinds []Kind) (kindSet, error) {
+	var set kindSet
+	if len(kinds) == 0 {
+		for i := range set {
+			set[i] = true
+		}
+		return set, nil
+	}
+	for _, k := range kinds {
+		i := slices.Index(secretKinds[:], k)
+		if i < 0 {
+			return kindSet{}, ErrUnknownKind
+		}
+		set[i] = true
+	}
+	return set, nil
+}
+
+// Options configures RedactWith.
+//
+// Kinds selects the secret kinds to redact; nil or empty selects all four
+// (AWS_ACCESS_KEY, AWS_SECRET_KEY, GITHUB_TOKEN, PRIVATE_KEY). Entries must
+// match exactly; anything else, including KindLabelLike, is ErrUnknownKind.
+//
+// Selection only restricts which inputs succeed. Detection and verification
+// always run in full, and a kind that is not selected is never passed
+// through: input containing it is refused with a *VerificationError naming
+// the kind. Do not retry a refusal with a different selection to get around
+// it.
+//
+// RedactWith copies Kinds at call start and never modifies or keeps it, so
+// one Options value may be shared across goroutines as long as none of them
+// modifies Kinds during a call.
+type Options struct {
+	Kinds []Kind
+}
+
 // Redact replaces covered secrets in input with labels such as
 // [AWS_ACCESS_KEY_1]. Labels are numbered per call in order of first
 // appearance, and equal values share a label within one call; the same
@@ -65,6 +115,20 @@ type span struct {
 // wrapping ErrVerificationFailed (naming only the kind) instead of output it
 // cannot vouch for. It is safe for concurrent use.
 func Redact(input []byte) (Result, error) {
+	return RedactWith(input, Options{})
+}
+
+// RedactWith is Redact restricted to the secret kinds in opts. On success
+// its output is byte-identical to Redact's. In addition to Redact's errors
+// it returns ErrUnknownKind for invalid options (checked before the input)
+// and a *VerificationError naming the first kind, in the order AWS_ACCESS_KEY,
+// AWS_SECRET_KEY, GITHUB_TOKEN, PRIVATE_KEY, that is present in the input but
+// not selected.
+func RedactWith(input []byte, opts Options) (Result, error) {
+	selected, err := newKindSet(opts.Kinds)
+	if err != nil {
+		return Result{}, err
+	}
 	if len(input) > MaxInputSize {
 		return Result{}, ErrInputTooLarge
 	}
@@ -72,12 +136,36 @@ func Redact(input []byte) (Result, error) {
 		return Result{}, err
 	}
 
-	spans := mergeSpans(detect(input))
+	raw := detect(input)
+	// Must run on the raw spans: mergeSpans keeps only the highest-priority
+	// kind of overlapping spans and would hide a nested unselected kind.
+	if err := checkSelected(raw, selected); err != nil {
+		return Result{}, err
+	}
+	spans := mergeSpans(raw)
 	out, counts, emitted := render(input, spans)
 	if err := verify(out, emitted); err != nil {
 		return Result{}, err
 	}
 	return Result{Output: out, Counts: counts}, nil
+}
+
+// checkSelected refuses input in which any raw span has a secret kind that is
+// not selected, naming the first such kind in secretKinds order. Label-like
+// text is never subject to selection.
+func checkSelected(spans []span, selected kindSet) error {
+	var present kindSet
+	for _, s := range spans {
+		if i := slices.Index(secretKinds[:], s.kind); i >= 0 {
+			present[i] = true
+		}
+	}
+	for i, k := range secretKinds {
+		if present[i] && !selected[i] {
+			return verifyError(k)
+		}
+	}
+	return nil
 }
 
 // checkEncoding rejects text the byte-oriented detectors cannot see through:

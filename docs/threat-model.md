@@ -61,6 +61,7 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 | Secret glued to an identifier (`AWS_KEY_AKIA...`) | No `\b` anchors; over-redaction is the accepted direction. |
 | Secrets leak through errors, logs or panics | Errors are constant sentinels; the verification error carries only a kind name. No logging; the only package-level state is read-only (compiled regexps and detector/check tables); fuzzing asserts no panics. |
 | Output aliases the caller's buffer | Output is always a fresh slice. |
+| A profile or caller narrows redaction (`RedactWith` with `Options.Kinds`) and leaks an unselected kind | Selection only restricts which inputs succeed. All detection and verification always run; if any raw detector span (before merging) has an unselected secret kind, including one nested inside another span, the whole input is refused with nil output and a `VerificationError` naming the first such kind in the fixed order `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `GITHUB_TOKEN`, `PRIVATE_KEY`. Unselected kinds are never passed through. Invalid kind names return the constant `ErrUnknownKind` (case-sensitive, closed set, never echoed). Label-like text is neutralised whatever is selected. See [ADR 0004](adr/0004-kind-selection-refuses-never-passes-through.md). |
 
 ### Accepted risks
 
@@ -71,6 +72,7 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
   - A truncated 20-35 character `ghp_` token.
   - `secret_access_key` followed by an unanchored 40 character run.
   - STS, IMDS and `credential_process` JSON (`"SecretAccessKey": "..."`) and Rails-style `secret_access_key:`: the detector requires an `aws` prefix on the key name but the verifier does not, so these fail instead of being redacted. Aligning detector and verifier is a possible follow-up.
+- **Kind selection false failures.** With a narrowed selection, an unselected kind nested inside a selected span (for example an `AKIA` string inside a PEM body with only `PRIVATE_KEY` selected) refuses the input, although `Redact` would have covered it. The check runs on raw spans so nesting cannot hide an unselected kind; refusing is the fail-closed direction.
 - **Over-redaction.** Unanchored matches inside longer identifiers, and text lost after a truncated PEM block or before an orphaned END marker.
 - **Input held fully in memory.** Whole-input processing is bounded by the 10 MiB cap. Peak heap growth on adversarial 10 MiB inputs (dense keys, label-like spam) is about 9x the input size, roughly 100 MiB per call. Measured with a sampled peak-heap test: 9.1x here, 8.3-9.5x in review runs, against a 10x budget, so the margin is thin. The sampled figure is a lower bound: sampling every 50 microseconds measured 9.4x. A caller that runs `Redact` concurrently must bound the number of in-flight calls.
 
@@ -81,6 +83,8 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 - Open only regular files; validate paths and refuse unsafe symlink traversal. Met by `internal/safefs` (see "Safe file opening"): no symlink in any component of the path as typed.
 - Write nothing until `Redact` succeeds. Output files go through `safefs.WriteSibling` (temp file in the pinned input directory, then atomic link or rename). A future `-o PATH` must reuse that rule; the CLI never writes a file by path.
 - Treat `ErrVerificationFailed` as a hard stop, not a prompt to retry with fewer detectors.
+- Do not retry a refusal for an unselected kind with a different selection to get past it. Adding the kind redacts it (the safe direction); deselecting a detected kind refuses.
+- A future CLI, config or MCP exposure of kind selection must validate kind names through `RedactWith` (`ErrUnknownKind`), not with its own parsing, and must map `ErrUnknownKind` to a fixed message.
 
 ### Follow-ups
 

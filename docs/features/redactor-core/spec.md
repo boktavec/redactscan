@@ -2,7 +2,7 @@
 
 Status: implemented (branch `feat/redactor-core`); fix round applied after staff and security review.
 Package: `internal/redactor` (Go stdlib only).
-Related: `docs/architecture.md` section 14, `docs/threat-model.md` (redaction section added by this feature), ADR `docs/adr/0001-redactor-core-pseudonyms-and-fail-closed.md` (written by this feature).
+Related: `docs/features/redactor-kinds/spec.md` (kind selection, `RedactWith`), `docs/architecture.md` section 14, `docs/threat-model.md` (redaction section added by this feature), ADR `docs/adr/0001-redactor-core-pseudonyms-and-fail-closed.md` (written by this feature).
 
 > Spec text never contains realistic secret values. Examples use placeholders such as `AKIA<16 upper/digits>`; tests generate secrets at runtime (see 10).
 

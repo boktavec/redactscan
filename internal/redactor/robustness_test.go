@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,6 +103,90 @@ func FuzzRedact(f *testing.F) {
 			t.Fatalf("secret %d (len %d) survived, wholly or in part", i, len(secrets[i].secret))
 		}
 	})
+}
+
+// kindsFromMask maps a bit mask to a selection; 0 is nil (all kinds).
+func kindsFromMask(mask uint8) []Kind {
+	var kinds []Kind
+	for i, k := range allKinds {
+		if mask&(1<<i) != 0 {
+			kinds = append(kinds, k)
+		}
+	}
+	return kinds
+}
+
+func FuzzRedactWith(f *testing.F) {
+	secrets := fuzzSecrets()
+	seeds := []string{"", "x", "[AWS_ACCESS_KEY_1]", "AKIA", pemMarker("END", "RSA") + "\n"}
+	for i := range secrets {
+		for _, seed := range seeds {
+			for _, mask := range []uint8{0, 1, 4, 8, 15} {
+				f.Add([]byte(seed), []byte(""), uint8(i), mask)
+			}
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, prefix, suffix []byte, which, mask uint8) {
+		input := bytes.Join([][]byte{prefix, []byte(secrets[int(which)%len(secrets)].embedded), suffix}, nil)
+		kinds := kindsFromMask(mask)
+		res, err := RedactWith(input, Options{Kinds: kinds})
+		want, wantErr := Redact(input)
+		if err != nil {
+			if res.Output != nil || res.Counts != nil {
+				t.Fatal("non-nil result alongside error")
+			}
+			if wantErr == nil {
+				// Only a selection refusal may add a failure to Redact's.
+				if k := errKind(err); k == "" || slices.Contains(kinds, k) {
+					t.Fatalf("unexpected refusal %v for selection %v", err, kinds)
+				}
+			}
+			return
+		}
+		if wantErr != nil {
+			t.Fatalf("RedactWith succeeded where Redact failed: %v", wantErr)
+		}
+		if !bytes.Equal(res.Output, want.Output) {
+			t.Fatal("RedactWith output differs from Redact")
+		}
+		for k := range res.Counts {
+			if k != KindLabelLike && len(kinds) > 0 && !slices.Contains(kinds, k) {
+				t.Fatalf("count for unselected kind %s", k)
+			}
+		}
+	})
+}
+
+func TestRedactWithConcurrentSharedOptions(t *testing.T) {
+	samples := kindSamples()
+	opts := Options{Kinds: []Kind{KindGitHubToken, KindAWSAccessKey}}
+	input := []byte(samples[KindGitHubToken] + "\n" + samples[KindAWSAccessKey])
+	want, err := Redact(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := []byte(samples[KindPrivateKey])
+
+	var wg sync.WaitGroup
+	for w := 0; w < 16; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := 0; round < 20; round++ {
+				res, err := RedactWith(input, opts)
+				if err != nil || !bytes.Equal(res.Output, want.Output) {
+					t.Errorf("concurrent result differs (err=%v)", err)
+					return
+				}
+				if _, err := RedactWith(refused, opts); !errors.Is(err, ErrVerificationFailed) {
+					t.Errorf("concurrent refusal missing: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestRedactConcurrentUse(t *testing.T) {

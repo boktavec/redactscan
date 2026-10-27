@@ -514,6 +514,8 @@ profiles:
       - paths
 ```
 
+Excluding a secret kind from a profile makes the redactor refuse input that contains it; it never passes the kind through and never relaxes verification (ADR 0004, `redactor.RedactWith`).
+
 Prefer typed pseudonyms:
 
 ```text
