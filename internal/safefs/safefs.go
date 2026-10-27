@@ -68,21 +68,26 @@ type opError struct {
 func (e *opError) Error() string { return "safefs: " + e.op + " failed" }
 func (e *opError) Unwrap() error { return e.err }
 
-// newOpError drops the *fs.PathError, *os.LinkError and *os.SyscallError
-// wrappers so a path cannot leak.
-func newOpError(op string, err error) error {
+// StripPath returns the bare error inside a *fs.PathError, *os.LinkError or
+// *os.SyscallError, or err itself otherwise. Those wrappers carry the path, so
+// callers that build their own fixed-text errors drop them with this.
+func StripPath(err error) error {
 	var pe *fs.PathError
 	var le *os.LinkError
 	var se *os.SyscallError
 	switch {
 	case errors.As(err, &pe):
-		err = pe.Err
+		return pe.Err
 	case errors.As(err, &le):
-		err = le.Err
+		return le.Err
 	case errors.As(err, &se):
-		err = se.Err
+		return se.Err
 	}
-	return &opError{op: op, err: err}
+	return err
+}
+
+func newOpError(op string, err error) error {
+	return &opError{op: op, err: StripPath(err)}
 }
 
 // afterLstat runs between Lstat and open. Tests in this package replace it to

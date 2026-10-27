@@ -1,0 +1,180 @@
+---
+title: "Live log source: FileSource follows a log safely, emits only complete lines, and fails closed on a suspicious rotation"
+---
+
+## Outcome
+
+`internal/logs` adds the `LogSource` interface from architecture section 15 and its first adapter, `FileSource`. It follows a log file like `tail -F` and sends complete lines on a channel. Memory stays bounded, and a fragment of a line is never emitted. Truncation and rotation are handled by standard-library polling. Every reopen goes through `safefs.OpenRegular`, plus an owner check and a link-count check. Story: [REDACT-65](http://localhost:8080/issue/REDACT-65). Full spec: `docs/features/file-log-source/spec.md`.
+
+Concrete example: `NewFileSource("app", "/var/log/app/app.log", FileOptions{})`, then `Read(ctx, Query{})`, streams each newly appended line. A 3 MiB JSON line becomes one marker `{Truncated: true, Dropped: 65537}` and none of its content. When logrotate rotates the file, the source finishes the old file up to its size at detection, then reopens the path. If the path is now `app.log -> ~/.ssh/id_ed25519`, the stream ends with one `Err: safefs.ErrSymlink` entry and the channel closes.
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:** a CLI command; redaction inside the adapter (the adapter emits raw lines and redaction comes in a later story); MCP, a ring buffer or search; last-N lines or a no-follow mode; fsnotify or backoff; other adapters; globs or multiple files; Windows (`ErrUnsupportedPlatform`).
+
+</Callout>
+
+## Delivery: three stacked PRs
+
+The total is about 1,060 changed lines (about 380 production, 550 tests, 130 docs), so the work is split well below the 500-line point.
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size"]}
+  rows={[
+    ["PR 1", "safefs.StripPath (shared path-stripping rule); logs types, interface, errors and opError; FileOptions and label validation; lineAssembler (cap, single marker, fragment-skip, cut); ADR 0005", "about 420"],
+    ["PR 2", "FileSource.Read: ctx checks, first open with safefs.OpenRegular, start at end with the last-byte check, follow loop, truncation, fail closed on stat and read errors; threat-model section (controls, contract, caller constraints)", "about 380"],
+    ["PR 3", "Rotation: Lstat vs Fstat SameFile, drain bounded to the size at detection, reopen with owner uid and Nlink == 1 checks, not-found retry, seams; rotation accepted risks; architecture section 15 note", "about 340"]
+  ]}
+/>
+
+## API
+
+<Code
+  id="api-code"
+  filename="internal/logs/logs.go"
+  language="go"
+  code={"type LogSource interface {\n\tName() string\n\tRead(ctx context.Context, q Query) (<-chan LogEntry, error)\n}\n\ntype Query struct {\n\tFromStart bool // false: start at the current end of the file\n}\n\n// One complete line, one drop marker, or (last entry only) a fatal error.\n// The channel always closes; only the last entry may carry Err.\ntype LogEntry struct {\n\tSource    string // label, never a path\n\tLine      []byte // raw, UNREDACTED, without the trailing \"\\n\"\n\tTruncated bool   // a line or part of one was dropped; Line is nil\n\tDropped   int64  // bytes discarded when the marker was sent (lower bound)\n\tErr       error\n}\n\ntype FileOptions struct {\n\tPollInterval time.Duration // 0 = 250ms; valid 10ms..1m\n\tMaxLineBytes int           // 0 = 64 KiB; max 1 MiB\n}\n\nvar (\n\tErrInvalidOptions = errors.New(\"logs: invalid options\")\n\tErrReopenRefused  = errors.New(\"logs: rotated file refused\")\n)\n\n// name: 1..128 bytes, valid UTF-8, no control or format (bidi) characters.\nfunc NewFileSource(name, path string, opts FileOptions) (*FileSource, error)"}
+/>
+
+## How a tick works
+
+<Diagram id="loop-diagram" frame="show" caption="Identity always comes from Fstat on the held descriptor. Every open is safefs.OpenRegular. Anything unexpected sends one Err entry, then the channel closes.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">1. Read (synchronous)</div>
+    <div class="diagram-node">ctx done: return ctx.Err(), no fd</div>
+    <div class="diagram-node">safefs.OpenRegular: refusal returned, no channel</div>
+    <div class="diagram-node">Fstat: reference identity and owner uid</div>
+    <div class="diagram-node">start at end: pread last byte, not newline means skip fragment</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">2. Read to EOF</div>
+    <div class="diagram-node">ReadAt into a fixed 32 KiB buffer</div>
+    <div class="diagram-node">lineAssembler: complete lines only</div>
+    <div class="diagram-node">over cap: one marker, skip to newline</div>
+    <div class="diagram-node">send with select on ctx.Done</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">3. Tick (250 ms)</div>
+    <div class="diagram-node">Fstat size below offset: truncation, cut, offset 0</div>
+    <div class="diagram-node">Lstat not found: keep reading the old fd</div>
+    <div class="diagram-node">not SameFile: rotation</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">4. Rotation</div>
+    <div class="diagram-node">drain old fd up to size S only, cut</div>
+    <div class="diagram-node">close old fd, seam hook</div>
+    <div class="diagram-node">OpenRegular: not found means wait without an fd</div>
+    <div class="diagram-node">uid must match, Nlink must be 1</div>
+  </div>
+  <div class="diagram-box result">
+    <span class="diagram-pill">refusal, ErrReopenRefused, stat or read error: one Err entry, then close</span>
+    <span class="diagram-pill">ctx cancel: close without Err</span>
+    <span class="diagram-pill">errors never carry the path, label, content or OS text</span>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.result { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 8px; }
+```
+
+</Diagram>
+
+## Line rules
+
+<Table
+  id="lines-table"
+  columns={["Case", "What is emitted", "Dropped"]}
+  rows={[
+    ["Complete line with at most MaxLineBytes bytes", "Line (fresh copy, trailing newline removed, carriage return kept)", "0"],
+    ["Line crosses MaxLineBytes before its newline", "One marker at once; the rest is discarded silently", "bytes discarded so far (at least cap + 1)"],
+    ["Start at end, file does not end in a newline", "Fragment skipped; one marker at the newline or the cap", "bytes skipped"],
+    ["Partial line cut by truncation or rotation", "One marker (none if this line already had one)", "pending bytes"],
+    ["Partial line at cancellation", "Nothing", "n/a"]
+  ]}
+/>
+
+<Callout id="lines-decision" tone="decision">
+
+**No fragment of a line ever leaves the adapter.** The threat model forbids splitting input across `Redact` calls, because a secret cut at the cap (for example an AWS key ID shortened below its 16-character minimum) would get past the detectors. `Dropped` is counted with a saturating add, but because the marker is sent once, when the cap is crossed, the value is bounded in practice. Newlines are found by scanning a fixed buffer by hand: no `bufio.Scanner`, `ReadBytes` or `ReadString`.
+
+</Callout>
+
+## Reopen checks
+
+<Callout id="reopen-decision" tone="decision">
+
+**On reopen, the owner uid must equal the first file's uid and the link count must be exactly 1. Otherwise the result is `ErrReopenRefused`.** This covers what `safefs` does not detect: a hard link to the user's own `~/.aws/credentials` planted at the path, or a file pre-created by another user in a shared log directory. A rotation that changes ownership, or a log with two hard links, ends the stream; that operational cost is intended. **Verified** with `go doc syscall.Stat_t` (go1.27.2): `Nlink` is `uint16` on darwin, `uint64` on linux/amd64 and `uint32` on linux/arm64 and linux/386, so it is converted to `uint64`; `Uid` is `uint32` everywhere. A `Sys()` that is not a `*syscall.Stat_t` is refused. The different-owner case is tested through an `fstat` seam, because a different owner cannot be created without root.
+
+</Callout>
+
+## Files
+
+<FileTree
+  id="files-tree"
+  entries={[
+    { path: "internal/safefs/safefs.go", change: "modified", note: "PR 1. StripPath exported; newOpError uses it (no behavior change)." },
+    { path: "internal/logs/logs.go", change: "added", note: "PR 1. Package doc (stream contract, caller constraints), LogSource, Query, LogEntry, errors, opError." },
+    { path: "internal/logs/options.go", change: "added", note: "PR 1. FileOptions defaults and bounds, label validation." },
+    { path: "internal/logs/lines.go", change: "added", note: "PR 1. lineAssembler: pure state machine, no I/O." },
+    { path: "internal/logs/file.go", change: "added", note: "PR 2 (Read, follow, truncation); PR 3 (rotation, reopen, seams)." },
+    { path: "internal/logs/owner_unix.go", change: "added", note: "PR 3. Uid and Nlink from Stat_t (darwin || linux)." },
+    { path: "internal/logs/owner_other.go", change: "added", note: "PR 3. Stub (ok=false) so task cross compiles." },
+    { path: "internal/logs/*_test.go", change: "added", note: "Per PR: options, lines, read and follow, truncation, rotation, error text, fd and goroutine leaks." },
+    { path: "docs/adr/0005-live-log-source-stream-contract.md", change: "added", note: "PR 1. Contract every future adapter inherits." },
+    { path: "docs/threat-model.md", change: "modified", note: "PR 2 section Live log sources; PR 3 rotation accepted risks." },
+    { path: "docs/architecture.md", change: "modified", note: "PR 3. Section 15 note: Query, LogEntry, label as Name, ADR 0005." }
+  ]}
+/>
+
+## Accepted risks
+
+<Callout id="risks-callout" tone="risk">
+
+- **Two rotations within one interval** skip the middle file. Writes to the old file after detection are lost, because the drain is bounded.
+- **copytruncate followed by regrowth** past the offset within one interval: the truncation is missed, and a mid-line fragment can be emitted.
+- **Inode identity** on NFS, FUSE and overlayfs can report a rotation falsely or miss one. A hung `Lstat` or read delays cancellation.
+- **/proc and /sys files** (size 0) are re-emitted on every tick, so they are unsupported input.
+- **First open** does not check the link count. This matches the safefs hard-link risk.
+- **Cross-line secrets.** The guarantee is "no partial line"; a PEM block spans several entries.
+- **A consumer that never cancels** pins one goroutine and one descriptor.
+
+</Callout>
+
+<Callout id="callers-callout" tone="warning">
+
+**Caller constraints** (package doc and threat model): redact with context across lines; never expose `Line` outside the process (to MCP or logs) before redaction; escape CR, NUL, ANSI and bidi characters before display; cap concurrent `Read` calls (each costs one fd, one goroutine and up to `MaxLineBytes` + 32 KiB); always cancel `ctx`; never allocate based on `Dropped`.
+
+</Callout>
+
+## Implementation steps
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "1. safefs.StripPath (PR 1)", note: "newOpError uses it; table test for PathError, LinkError, SyscallError, Errno and nil; existing safefs tests pass." },
+    { id: "step-2", label: "2. logs contract types and opError (PR 1)", note: "Depends on 1. Fixed text; unwraps to Errno; errors.Is fs.ErrNotExist works." },
+    { id: "step-3", label: "3. Options and label validation (PR 1)", note: "Depends on 2. Every boundary: 9ms, 10ms, 1m, 1m+1ns, negative values, 1 MiB+1, 129-byte label, invalid UTF-8, ESC, U+202E, NUL in the path." },
+    { id: "step-4", label: "4. lineAssembler (PR 1)", note: "Depends on 2. Exactly the cap and cap+1; one marker across many chunks; empty line; CRLF; cut cases; fragment-skip; no aliasing; saturating add." },
+    { id: "step-5", label: "5. ADR 0005 (PR 1)", note: "Depends on 2-4." },
+    { id: "step-6", label: "6. Read: open, start position, follow (PR 2)", note: "Depends on PR 1. FromStart vs end; fragment-skip; append then receive; 10 MiB line heap bound; ctx already done; cancel closes; synchronous refusals (symlink, symlinked parent, FIFO within 2 s, directory, missing, mode 000); fd and goroutine baselines." },
+    { id: "step-7", label: "7. Truncation and stream errors (PR 2)", note: "Depends on 6. Truncate then write again; stat error via the seam gives one Err entry, then close, no leak." },
+    { id: "step-8", label: "8. Threat-model section (PR 2)", note: "Live log sources: controls, contract, caller constraints." },
+    { id: "step-9", label: "9. Rotation and reopen checks (PR 3)", note: "Depends on PR 2. Rename and create; marker for a partial line; bounded drain; path removed; not-found then appears; via the seam: symlink, FIFO, directory, hard link, different uid; Err then close; no leak." },
+    { id: "step-10", label: "10. Docs (PR 3)", note: "Depends on 9. Rotation accepted risks; architecture section 15 note." }
+  ]}
+/>
+
+## Verification
+
+- `task test` after each step. `task verify` (fmt, lint, test, cross, security, secrets) before each PR is marked ready.
+- Each PR runs `go test -race ./internal/logs/...` and the Linux container run `docker run --rm -v "$PWD":/src -w /src golang:1.27 go test ./...`, and records both results in the PR.
+- Break-the-guard checks, each reverted afterwards: emit pending bytes on cut; remove the cap check; compare against the first Lstat instead of Fstat; drop the Nlink check; drop the owner check; make the drain unbounded; treat not-found at reopen as fatal; remove ctx.Done from the send select. Each change must make a test fail.
+- Tests use real files only, apart from two noted seams (rotation timing and fstat). They wait on channel deadlines and use sentinel lines instead of sleeps.
+- `staff-engineering-reviewer` and `security-reviewer` review each PR.
