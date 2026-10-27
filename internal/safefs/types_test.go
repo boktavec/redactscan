@@ -49,8 +49,8 @@ func TestFileType(t *testing.T) {
 		{fs.ModeIrregular, TypeIrregular},
 	}
 	for _, tt := range tests {
-		if got := fileType(tt.mode); got != tt.want {
-			t.Errorf("fileType(%v) = %q, want %q", tt.mode, got, tt.want)
+		if got := TypeOf(tt.mode); got != tt.want {
+			t.Errorf("TypeOf(%v) = %q, want %q", tt.mode, got, tt.want)
 		}
 	}
 }

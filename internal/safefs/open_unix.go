@@ -21,7 +21,7 @@ func OpenRegular(path string) (*os.File, error) {
 		return nil, ErrSymlink
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, &NotRegularError{Type: fileType(fi.Mode())}
+		return nil, &NotRegularError{Type: TypeOf(fi.Mode())}
 	}
 
 	afterLstat()
@@ -47,7 +47,7 @@ func OpenRegular(path string) (*os.File, error) {
 	}
 	if !st.Mode().IsRegular() {
 		_ = f.Close()
-		return nil, &NotRegularError{Type: fileType(st.Mode())}
+		return nil, &NotRegularError{Type: TypeOf(st.Mode())}
 	}
 
 	// Go never clears an O_NONBLOCK passed to open; restore blocking reads.

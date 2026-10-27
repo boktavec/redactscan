@@ -51,9 +51,9 @@ Visual plan: `plans/recursive-ingest/plan.mdx`.
 | FR7 | Special files skipped with a Finding (acceptance 2). | FIFO, character/block device, socket and other irregular modes give `ingest-special-file` (low) with `Metadata["file_type"]` = `fifo`, `device`, `socket` or `irregular`; never opened; no Artifact. |
 | FR8 | Depth limit (acceptance 3). | An entry's depth = number of components in its `RelativePath`. A directory at depth `== MaxDepth` is counted but not opened or listed; each such directory increments `depth_skipped`. Walk continues with siblings. |
 | FR9 | Entry limit (acceptance 3). | Every name read from any directory (files, directories, symlinks, special files) counts. When the count would exceed `MaxEntries`, at most `MaxEntries` entries are processed in total, `entries_capped=true`, and no further directory is listed. Which entries survive a cut inside one directory depends on filesystem order (documented). |
-| FR10 | Path length cap. | `MaxPathBytes = 1024`. An entry whose full `Path` exceeds it gives `ingest-path-too-long` (medium), no Artifact, is not descended, increments `path_too_long`. |
+| FR10 | Path length cap. | `MaxPathBytes = 1024` with headroom: an entry is accepted only when `len(Path) + len("/private") < MaxPathBytes`, so the longest accepted `Path` is 1015 bytes (one byte for the NUL and 8 for the macOS rewrite of a `/tmp`, `/var` or `/etc` root to `/private/...`). The same rule applies on every OS. An entry that fails it gives `ingest-path-too-long` (medium), no Artifact, is not descended, increments `path_too_long`. |
 | FR11 | Changed entries. | A directory replaced between `Lstat` and open (by a FIFO, a symlink to a FIFO, a symlink to a directory, a different directory) gives `ingest-changed` (medium), increments `changed`, returns within 2 s, leaks no fd. |
-| FR12 | Read errors. | Failure to open or list a directory: `ingest-read-error` (medium, `Metadata["op"]` = `open dir` or `list dir`). `Lstat` failure on an entry: `ingest-read-error` (low, `op` = `lstat`). Each increments `read_errors`. A listing error after a partial batch: names already read are processed, then the error is recorded. |
+| FR12 | Read errors. | Failure to open or list a directory: `ingest-read-error` (medium, `Metadata["op"]` = `open dir` or `list dir`). `Lstat` failure on an entry: `ingest-read-error` (low, `op` = `lstat`). Each increments `read_errors`. A listing error after a partial batch: the error is recorded first, then the names already read are processed (section 3.5). |
 | FR13 | Incomplete contract (acceptance 3). | If any of `depth_skipped`, `entries_capped`, `read_errors`, `changed`, `path_too_long` is non-zero/true: `Walk` returns the partial `Result` and an error with `errors.Is(err, ErrIncomplete)`, and `Result.Findings` contains exactly one `ingest-incomplete` Finding (medium, last in the list) whose Metadata holds all five counters (`entries_capped` bool, others int). Otherwise the error is nil and there is no `ingest-incomplete` Finding. Symlinks and special files alone do not make the walk incomplete. |
 | FR14 | Produced values are valid. | Every Artifact and Finding is passed through `Validate` before it is appended. A failure returns `ErrInternal` with an empty `Result` (never a silent drop, never `ErrIncomplete`). Test: every Finding/Artifact in every test result validates. |
 | FR15 | No path, name or OS text in errors. | No error returned by `Walk`, `OpenDirRoot` or `OpenChildDir` contains the root path, any entry name, a link target or OS error text (marker-name test on every error path). |
@@ -160,7 +160,7 @@ const (
 	DefaultMaxEntries = 100_000
 	MaxMaxDepth       = 256       // one open descriptor per level
 	MaxMaxEntries     = 1_000_000
-	MaxPathBytes      = 1024      // macOS PATH_MAX; applied on every OS
+	MaxPathBytes      = 1024      // macOS PATH_MAX incl. NUL, minus "/private" headroom; every OS
 )
 
 type Limits struct {
@@ -197,7 +197,7 @@ State: top root (`*os.Root` from `OpenDirRoot`, kept open for the whole walk, us
 2. **Cap.** If `len(names) > remaining`: sort, keep the first `remaining`, set `entriesCapped`. `entries += len(names)`.
 3. **Sort** `names` in byte order (`slices.Sort`).
 4. For each `name` (child depth `d = depth+1`, `childRel = rel + "/" + name` or `name` at the top):
-   1. `path := prefix + "/" + childRel` (3.4). If `len(path) > MaxPathBytes`: `ingest-path-too-long`, `pathTooLong++`, continue.
+   1. `path := prefix + "/" + childRel` (3.4). If `len(path) + len("/private") >= MaxPathBytes` (FR10): `ingest-path-too-long`, `pathTooLong++`, continue.
    2. `fi, err := r.Lstat(name)`. Error: `ingest-read-error` (low, `op=lstat`), `readErrors++`, continue.
    3. Switch on `fi.Mode().Type()`:
       - **Regular:** append Artifact (FR4).
@@ -262,7 +262,7 @@ All: `ID = "<kind>-<n>"` (n is a per-walk Finding counter starting at 1), `Categ
 | Classify symlinks against the top root (user + R4) | Escapes and loops are the suspicious cases; reporting every link keeps coverage visible; top-root resolution is correct for nested sibling links. | One generic Finding; report only escapes/loops; child-root classification (false escapes). |
 | Partial `Result` plus `ErrIncomplete`, plus exactly one medium `ingest-incomplete` Finding (user + R2) | Default Go error handling fails closed; partial Findings are kept; the summary Finding keeps reports honest even when a caller handles the error. | Flag only (easy to ignore); error only (loses partial Findings); per-limit Findings (more kinds, same information). |
 | Limits 64 / 100,000 counting every entry; zero = default; negative or above caps 256 / 1,000,000 rejected (user + advisory) | Counting every entry bounds work for trees of empty dirs, links or FIFOs; caps bound descriptors and memory; an unset field never means "unlimited". | Count only files (unbounded on non-file trees); 32 / 10,000 (too tight for monorepos). |
-| `MaxPathBytes = 1024` on every OS; over-cap entries reported and skipped (R3) | Every Artifact `Path` stays openable by `OpenRegular` (macOS `PATH_MAX`), and memory per entry is bounded. One constant is simpler than per-OS values. | Per-OS caps (4096 on Linux); no cap (16 KiB paths, `ENAMETOOLONG` later). |
+| `MaxPathBytes = 1024` on every OS, with `len("/private")` headroom, so the longest accepted `Path` is 1015; over-cap entries reported and skipped (R3) | Every Artifact `Path` stays openable by `OpenRegular` even when a typed `/tmp/` root is rewritten to `/private/tmp/` and `PATH_MAX` (1024) counts the NUL; memory per entry is bounded. One rule is simpler than per-OS values or a safefs helper. | Per-OS caps (4096 on Linux); no cap (16 KiB paths, `ENAMETOOLONG` later). |
 | No total path-bytes budget; document the ~130 MiB worst case (user) | Comparable to the redactor's ~100 MiB per-call budget; one less knob. | `Limits.MaxPathBytesTotal`. |
 | Full directory read (up to budget+1), close, byte-order sort, process (R6) | Deterministic output and IDs; at most one listing handle open; `Readdirnames` avoids the per-entry `lstat` and silent `ENOENT` skip of `ReadDir` on a Root-opened file. | Batch-local sort (non-deterministic); `ReadDir`. |
 | Artifact IDs `a-<n>` per walk | Generated, unique, stable for an unchanged tree because of sorting; no hashing of names. | Hash of relative path (stable across tree changes, more reasoning about collisions). |
