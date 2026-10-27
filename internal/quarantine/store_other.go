@@ -2,6 +2,8 @@
 
 package quarantine
 
+import "os"
+
 // Store is not usable on this platform.
 type Store struct{}
 
@@ -10,3 +12,5 @@ func Open(string, Options) (*Store, error) { return nil, ErrUnsupportedPlatform 
 
 func (*Store) Close() error       { return nil }
 func (*Store) Repaired() []string { return nil }
+
+func (*Store) Put(*os.File, Input) (string, error) { return "", ErrUnsupportedPlatform }
