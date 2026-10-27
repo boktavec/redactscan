@@ -1,0 +1,195 @@
+---
+title: "Scanner interface, registry and scan FILE: fail-closed, isolated scanners over one safely read file"
+---
+
+## Outcome
+
+`redactscan scan FILE` reads one file through `safefs.OpenRegular` (never executing it), runs every registered scanner over the same in-memory snapshot, and prints their findings sorted deterministically.
+
+Anything that stops a scanner from running cleanly marks the scan **incomplete** and exits 1, while the other scanners' findings are still shown. That covers an error, a panic, Goexit, an invalid or unredacted finding, cancellation, an over-cap file, too many findings, or no scanner having run.
+
+This story ships no production scanners (REDACT-37 adds the first), so every real scan reports `no scanner ran` and exits 1 until then. Story: [REDACT-36](http://localhost:8080/issue/REDACT-36). Spec: `docs/features/scanner-scan-file/spec.md`. ADR: `docs/adr/0004-scanner-contract-content-and-isolation.md`.
+
+<Code
+  id="example-session"
+  language="text"
+  filename="example: two test scanners, one panics"
+  code={"$ redactscan scan ./install.sh\nhigh \"script-curl-pipe-sh\" \"./install.sh\":12 \"Remote script piped to shell\"   # stdout\nredactscan: scan incomplete: filetype: panic                                  # stderr\nredactscan: scan incomplete: 1 findings                                       # stderr\n$ echo $?\n1"}
+/>
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:**
+
+- real scanners (REDACT-37)
+- directory walking, worker pool, `scan ./dir` and `internal/ingest` (REDACT-39)
+- report format and JSON (REDACT-38)
+- a findings-present exit code (REDACT-50)
+- per-scanner timeouts, signal handling and concurrency
+- stdin input
+- `io.ReaderAt` streaming (a planned later change)
+- any change to `internal/redactor` (REDACT-16 is changing it in parallel)
+
+</Callout>
+
+## Architecture
+
+<Diagram id="flow-diagram" frame="show" caption="The CLI owns file I/O. internal/scanner is I/O-free and owns isolation, checks and ordering.">
+
+```html
+<div style="display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:16px;align-items:start">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">internal/cli (scan)</div>
+    <div class="diagram-node">parse args (exactly 1 FILE)</div>
+    <div class="diagram-node">readArtifact: safefs.OpenRegular, LimitReader(cap+1)</div>
+    <div class="diagram-node">Artifact{ID "file-1", Size len(content)}</div>
+    <div class="diagram-node">format: quote id, file, title</div>
+    <div class="diagram-node">exit 0 / 1 / 2 / 3</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">internal/scanner Registry.Run (no I/O)</div>
+    <div class="diagram-box">1. a.Validate() else invalid artifact</div>
+    <div class="diagram-box">2. len(content) &gt; 10 MiB else too large</div>
+    <div class="diagram-box">3. per scanner, in order: ctx check, Supports, Scan, each on its own goroutine with completed flag</div>
+    <div class="diagram-box">4. checkFinding: Validate, ArtifactID, bounds, redactor check, cap 1000</div>
+    <div class="diagram-box">5. Ran == 0 gives no scanner; then sort</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Result</div>
+    <div class="diagram-node">Findings (sorted)</div>
+    <div class="diagram-node">Failures {Scanner, Reason}</div>
+    <div class="diagram-node">Ran</div>
+    <div class="diagram-muted">Incomplete() = len(Failures) &gt; 0</div>
+  </div>
+</div>
+```
+
+</Diagram>
+
+<AnnotatedCode
+  id="api-code"
+  filename="internal/scanner (planned API)"
+  language="go"
+  code={"const (\n    MaxContentSize = 10 << 20 // Assumed default\n    MaxFindings    = 1000\n    MaxIDBytes     = 128\n    MaxTitleBytes  = 128\n    MaxFileBytes   = 4096\n    RegistryName   = \"registry\"\n)\n\ntype Scanner interface {\n    Name() string\n    Supports(a artifact.Artifact) bool\n    Scan(ctx context.Context, a artifact.Artifact, content []byte) ([]finding.Finding, error)\n}\n\ntype Failure struct {\n    Scanner string // registered name or RegistryName\n    Reason  Reason // error, panic, invalid finding, canceled, too large,\n                   // invalid artifact, no scanner, too many findings\n}\n\ntype Result struct {\n    Findings []finding.Finding\n    Failures []Failure\n    Ran      int\n}\n\nfunc NewRegistry(scanners ...Scanner) (*Registry, error)\nfunc Default() (*Registry, error) // empty until REDACT-37\nfunc (r *Registry) Run(ctx context.Context, a artifact.Artifact, content []byte) Result\n\nfunc call(f func()) bool {\n    done := make(chan bool, 1)\n    go func() {\n        completed := false\n        defer func() {\n            if !completed {\n                _ = recover()\n            }\n            done <- completed\n        }()\n        f()\n        completed = true\n    }()\n    return <-done\n}"}
+  annotations={[
+    { lines: "2", label: "Cap", note: "Over-cap content runs no scanner: {registry, too large}. Scanners never see truncated input." },
+    { lines: "13", label: "Deviation from architecture section 7", note: "Content is passed in, read once by the caller. Planned migration: a bounded io.ReaderAt (SectionReader over the file opened once)." },
+    { lines: "28", label: "Explicit registry", note: "Ordered; names ^[a-z0-9][a-z0-9-]{0,31}$, unique, 'registry' reserved; Name() captured once. No global Register or init." },
+    { lines: "32-46", label: "Goexit-safe isolation", note: "The completed flag catches panic(v), panic(nil) and runtime.Goexit. The panic value is dropped. Sequential wait: no leaks, no concurrency." }
+  ]}
+/>
+
+## Fail-closed outcomes
+
+<Table
+  id="failure-table"
+  columns={["Trigger", "Failure", "Effect"]}
+  rows={[
+    ["a.Validate() fails", "{registry, invalid artifact}", "No scanner runs"],
+    ["len(content) > 10 MiB", "{registry, too large}", "No scanner runs; stderr: file exceeds 10 MiB limit"],
+    ["ctx done before a scanner", "{name, canceled} for it and every later one", "Earlier findings kept"],
+    ["Supports or Scan panics, panic(nil), Goexit", "{name, panic}", "Value never printed; next scanner runs"],
+    ["Scan returns an error", "{name, error} (canceled if ctx done)", "That call's findings discarded; error text never printed"],
+    ["Finding fails Validate, ArtifactID, bounds or the redactor check", "{name, invalid finding} once per scanner", "Only that finding dropped"],
+    ["More than 1000 accepted findings", "{name, too many findings} once per scanner", "First 1000 in registry order kept"],
+    ["Ran == 0 (empty, all unsupported, all failed)", "{registry, no scanner}", "stderr: scan incomplete: no scanner ran"]
+  ]}
+/>
+
+<Callout id="output-callout" tone="warning">
+
+**Untrusted output.**
+
+- `scan` prints only severity, ID, File, Line and Title. Evidence, Description, Category, Metadata, ArtifactID and error or panic values are never printed (canary-tested).
+- ID, Title and Evidence must pass `redactor.Redact` with no kind other than label-like.
+- ID and Title are at most 128 bytes of UTF-8, File at most 4096 bytes, and Line at least 0.
+- ID, File and Title are `strconv.Quote`d, so ESC, CR, bidi overrides and invalid UTF-8 appear escaped.
+
+</Callout>
+
+## CLI behavior (provisional until REDACT-38 and REDACT-50)
+
+<Table
+  id="exit-table"
+  columns={["Exit", "When", "Output"]}
+  rows={[
+    ["0", "Scan complete (any number of findings)", "stdout: one line per finding; stderr: scan complete: N findings"],
+    ["1", "Scan incomplete (takes precedence over findings)", "stdout: findings that survived; stderr: one line per failure, then scan incomplete: N findings"],
+    ["2", "Usage: no FILE, extra args, '-', unknown flag", "usage text"],
+    ["3", "Open or read error (symlink, FIFO, directory, missing), or a stdout write error", "cannot open \"path\": fixed reason, or cannot write output: write failed (failure lines still print)"]
+  ]}
+/>
+
+## Decisions
+
+<Table
+  id="decisions-table"
+  columns={["Decision", "Why", "Rejected"]}
+  rows={[
+    ["content []byte read once by the caller (ADR 0004)", "One open, one cap, one snapshot for all scanners; no I/O in scanners", "Each scanner opens a.Path (TOCTOU, N opens); io.ReaderAt now (no need yet, planned later)"],
+    ["Over cap: incomplete, no scanners run", "Fail closed without partial-content bugs; one outcome type", "Refuse via a separate path; scan a truncated prefix"],
+    ["10 MiB cap (Assumed)", "Matches the redactor; bounded memory per file", "Configurable or larger before measuring"],
+    ["readArtifact helper in internal/cli", "Scanner stays I/O-free; no overlap with REDACT-39 ingest", "scanner.ScanFile; waiting for ingest.File"],
+    ["Goroutine per call with completed flag", "Survives panic(nil) and Goexit; one bug can't kill a directory scan", "No recovery; recover() != nil only"],
+    ["Scanner imports redactor for printed fields", "Defense in depth when a detector forgets to redact", "Contract only; duplicated verifier"],
+    ["Explicit registry, no init", "No hidden state; easy test registries", "Global Register()"],
+    ["ArtifactID mismatch is an invalid finding", "Keeps reports attributable; exposes the bug", "Overwrite ArtifactID"],
+    ["context.Background() in CLI", "No Ctrl-C or deadline requirement yet", "signal.NotifyContext now"],
+    ["Sort: severity desc, ArtifactID, File, Line, ID, Category, Title, Evidence", "Total order independent of registry order", "Registry order"]
+  ]}
+/>
+
+<FileTree
+  id="file-tree"
+  entries={[
+    { path: "internal/scanner/scanner.go", change: "added", note: "PR 1. Package doc with the scanner contract; Scanner, Reason, Failure, Result, limits" },
+    { path: "internal/scanner/registry.go", change: "added", note: "PR 1. NewRegistry, Default, ErrInvalidRegistry, RegistryName" },
+    { path: "internal/scanner/run.go", change: "added", note: "PR 1. Run, call, checkFinding, redactorClean, sortFindings" },
+    { path: "internal/scanner/scanner_test.go", change: "added", note: "PR 1. Registry, isolation, cap, ctx, bounds, redactor check, findings cap, sort" },
+    { path: "internal/scanner/imports_test.go", change: "added", note: "PR 1. Import allowlist (refuses os, os/exec, syscall, net, plugin, unsafe, log, safefs)" },
+    { path: "internal/scanner/scannertest/scannertest.go", change: "added", note: "PR 1. AssertNoMutation for every future scanner's tests" },
+    { path: "internal/cli/scan.go", change: "added", note: "PR 2. runScan, readArtifact, formatting, exit codes, defaultRegistry seam" },
+    { path: "internal/cli/cli.go", change: "modified", note: "PR 2. Dispatch scan; usage text marked provisional" },
+    { path: "internal/cli/scan_test.go", change: "added", note: "PR 2. CLI behavior, canaries, quoting, stdout failure" },
+    { path: "internal/cli/scan_unix_test.go", change: "added", note: "PR 2. Symlink, FIFO, directory" },
+    { path: "docs/adr/0004-scanner-contract-content-and-isolation.md", change: "added", note: "PR 2. Content passing, io.ReaderAt migration, isolation, redactor check" },
+    { path: "docs/architecture.md", change: "modified", note: "PR 2. Section 7 signature" },
+    { path: "docs/threat-model.md", change: "modified", note: "PR 2. Scanner section with accepted risks" },
+    { path: "README.md", change: "modified", note: "PR 2. scan usage line" }
+  ]}
+/>
+
+## Implementation: two stacked PRs
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "PR 1: scanner.go types, limits, contract doc", note: "FR1, FR10, FR11, FR22." },
+    { id: "step-2", label: "PR 1: registry.go", note: "FR2, FR3, FR25. Validation table, order, Name called once, Default() returns no error." },
+    { id: "step-3", label: "PR 1: run.go core (call, validate, cap, ctx, errors, Ran, sort)", note: "FR4-FR9, FR16, FR20, FR23, FR24. Panic, panic(nil) and Goexit in Supports and Scan; determinism over 2 orders x 50 runs." },
+    { id: "step-4", label: "PR 1: checkFinding bounds and redactor check", note: "FR17, FR18. Runtime-built secret shapes dropped, label-like kept, NUL dropped." },
+    { id: "step-5", label: "PR 1: findings cap", note: "FR27. 1000 vs 1001." },
+    { id: "step-6", label: "PR 1: import allowlist test and scannertest", note: "FR21, FR28. Split steps 4-6 into PR 1b if PR 1 exceeds about 500 lines." },
+    { id: "step-7", label: "PR 1: task verify", note: "fmt, lint, test, cross, security, secrets." },
+    { id: "step-8", label: "PR 2: scan command, readArtifact, output, exit codes, usage", note: "FR12-FR15, FR19, FR26. Canary, quoting and stdout-failure tests." },
+    { id: "step-9", label: "PR 2: unix tests for symlink, FIFO, directory", note: "Exit 3 with a fixed reason; FIFO must not hang." },
+    { id: "step-10", label: "PR 2: ADR 0004, architecture section 7, threat model, README", note: "FR29." },
+    { id: "step-11", label: "PR 2: task verify and manual checks", note: "scan README.md gives exit 1 no scanner ran; symlink and dir exit 3; 10 MiB+1 exit 1; no args exit 2." }
+  ]}
+/>
+
+## Accepted risks
+
+<Table
+  id="risks-table"
+  columns={["Risk", "Mitigation or follow-up"]}
+  rows={[
+    ["No per-scanner timeout; a hung scanner blocks", "Ctrl-C; REDACT-39 may add deadlines with the worker pool"],
+    ["content and a.Metadata are shared read-only by contract only", "scannertest.AssertNoMutation required in scanner tests"],
+    ["No findings-present exit code; a complete scan with high findings exits 0", "REDACT-50"],
+    ["A panic in a goroutine a scanner started crashes the process (exit 2, same as usage)", "Forbidden by the contract; recorded in the threat model"],
+    ["The redactor check covers only the covered formats", "Documented; detectors still own redaction"],
+    ["An in-place modification during the read can mix content", "Same as the redact and safefs accepted risk"],
+    ["Every real scan is incomplete until REDACT-37", "Intentional; stated in usage and README"]
+  ]}
+/>
