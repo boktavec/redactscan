@@ -342,7 +342,7 @@ func TestUsageErrors(t *testing.T) {
 		reason string
 	}{
 		{"no args", nil, "redactscan: missing command\n"},
-		{"unknown command", []string{"scan"}, `redactscan: unknown command "scan"` + "\n"},
+		{"unknown command", []string{"frobnicate"}, `redactscan: unknown command "frobnicate"` + "\n"},
 		{"unknown flag", []string{"redact", "-nope"}, "redactscan: invalid arguments\n"},
 		{"two files", []string{"redact", "a", "b"}, "redactscan: expected at most one FILE argument (flags must come before FILE)\n"},
 		{"flag after file", []string{"redact", "app.log", "-summary"}, "redactscan: expected at most one FILE argument (flags must come before FILE)\n"},

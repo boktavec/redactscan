@@ -5,6 +5,7 @@ Security-focused CLI for scanning untrusted files and repositories and redacting
 
 ```
 redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]
+redactscan scan FILE
 ```
 
 Reads FILE (or stdin when FILE is `-` or absent), replaces covered secret formats (AWS access and secret keys, GitHub tokens, PEM private keys) with numbered labels such as `[GITHUB_TOKEN_1]`, and writes the result. With FILE the result goes to a new file next to it, named by adding `_cleaned` before the last extension (`logs/app.log` becomes `logs/app_cleaned.log`, `.env` becomes `.env_cleaned`), with mode 0600; stdin always goes to stdout. Other secret formats pass through unchanged, so review the output before sharing it. Input is limited to 10 MiB.
@@ -32,3 +33,7 @@ go run ./cmd/redactscan redact -stdout app.log > app.redacted.log
 ```
 
 FILE must be a regular file reached without symlinks: a symlink in any part of the path, a FIFO, a device, a socket or a directory is refused with exit 3. On macOS the system links `/tmp`, `/var` and `/etc` are allowed.
+
+### scan
+
+`redactscan scan FILE` reads FILE (never executes it) and runs every registered scanner over it. Stdout gets one line per finding, `SEVERITY "ID" "FILE"[:LINE] "TITLE"`; failure lines and a summary go to stderr. Files over 10 MiB are not scanned. A scan is incomplete, and exits 1, if a scanner fails or no scanner ran. No scanners are registered yet, so every scan currently reports `scan incomplete: no scanner ran`. The output format and exit codes (0 complete, 1 incomplete, 2 usage error, 3 I/O error) are provisional. A complete scan with no findings only means the registered scanners found nothing.

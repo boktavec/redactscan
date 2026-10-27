@@ -153,3 +153,36 @@ Accepted risks: a fatal signal can leave a hidden `.redactscan-*.tmp` with redac
 - **No `-o PATH`.** The output name is derived; an explicit path is not implemented and would need the `WriteSibling` rules.
 - **Derived name may escape ignore and sync rules** (`.env` becomes `.env_cleaned`), and uncovered secret formats pass through to the file; stderr carries a fixed reminder on every write.
 - **Flags before FILE.** A flag after FILE is a usage error.
+
+## Scanner (`internal/scanner`, `scan` command)
+
+`redactscan scan FILE` runs every registered scanner over one file and prints findings. See `docs/features/scanner-scan-file/spec.md` and ADR 0004. No production scanners exist yet, so every real scan is incomplete (`no scanner ran`, exit 1).
+
+### Trust boundary
+
+Scanned content is untrusted, and so is scanner output, because it is derived from that content. The terminal and later report consumers are less trusted.
+
+### Controls
+
+- **Never executed.** The CLI only reads, through `safefs.OpenRegular` (symlinks, FIFOs, devices and directories refused). No `os/exec` in `internal/scanner` or `internal/cli`; an import-allowlist test keeps `os`, `os/exec`, `syscall`, `net`, `plugin`, `unsafe`, `log` and `internal/safefs` out of `internal/scanner`.
+- **Bounded input.** At most `MaxContentSize+1` bytes are read; an over-cap file is incomplete, never truncated.
+- **Fail closed.** An error, panic (including `panic(nil)`) or `runtime.Goexit` in a scanner, an invalid finding, cancellation, the 1000-findings cap, an invalid artifact, an empty or all-unsupported registry: each is a recorded `Failure` and exit 1. Each `Supports` and `Scan` call runs on its own goroutine that `Run` waits for.
+- **No content in messages.** Error and panic values are never stored or printed. Failure lines use validated scanner names and constant reasons.
+- **Output minimisation.** Only severity, ID, File, Line and Title are printed. ID, File and Title are `strconv.Quote`d, so control and bidi characters appear escaped. ID, Title, File and Evidence must pass a `redactor` check (anything but label-like text drops the finding), and ID and Title are bounded to 128 bytes of UTF-8, File to 4096 bytes.
+- **Registry.** Names are validated, unique and captured once; `registry` is reserved for failures not tied to a scanner.
+- **Scanner contract.** Scanners must not modify `content` or `a.Metadata`, spawn goroutines that outlive `Scan`, exit the process, or put scanned content in errors or panics. `scannertest.AssertNoMutation` checks mutation in each scanner's tests.
+
+### Exit codes (provisional until REDACT-50)
+
+0 complete (any number of findings), 1 incomplete, 2 usage error, 3 open, read or stdout write error.
+
+### Accepted risks
+
+- No per-scanner timeout: a hung scanner blocks the scan until interrupted.
+- `content` and `a.Metadata` are shared read-only by contract only; mutation is not detected at runtime.
+- A complete scan with high-severity findings exits 0 until REDACT-50 adds a findings exit code.
+- A panic in a goroutine a scanner started itself is not recovered; the process crashes with Go's exit status 2, the same as a usage error.
+- The redactor check covers only the redactor's covered formats.
+- A file modified in place during the read can yield mixed content.
+- Invalid-finding floods are not capped: only accepted findings count toward `MaxFindings`, so a scanner returning many invalid findings costs about 1.7 s per million secret-shaped ones (measured). Deferred to REDACT-37 or REDACT-39.
+- A legitimate finding whose ID, Title, File or Evidence resembles a covered secret format is dropped as `invalid finding` (fail closed).

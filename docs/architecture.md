@@ -165,10 +165,14 @@ Scanners should be pluggable.
 ```go
 type Scanner interface {
     Name() string
-    Supports(a Artifact) bool
-    Scan(ctx context.Context, a Artifact) ([]Finding, error)
+    Supports(a artifact.Artifact) bool
+    Scan(ctx context.Context, a artifact.Artifact, content []byte) ([]finding.Finding, error)
 }
 ```
+
+The caller opens the file once through `safefs`, reads at most `scanner.MaxContentSize+1` bytes and passes them in as `content`, so scanners never open files. A file over `MaxContentSize` is not scanned (no scanner runs and the result is incomplete); content is never truncated (a planned later change moves to a bounded `io.ReaderAt`). This adds `content` to the earlier sketch; see [ADR 0004](adr/0004-scanner-contract-content-and-isolation.md).
+
+`scanner.NewRegistry` builds an explicit, ordered, immutable list of scanners (no global registration). `Registry.Run` runs them one at a time and is fail-closed: a returned error, a panic, an invalid finding, cancellation, an over-cap file, too many findings, an invalid artifact or no scanner having run is recorded as a `Failure` with a fixed reason, the `Result` is incomplete, and the findings from scanners that did work are kept. Findings are checked (bounds, `redactor` check on ID, Title, File and Evidence; at most 1000 accepted per run, checked first) and sorted deterministically. The scanner contract is in the `internal/scanner` package doc.
 
 Initial scanners:
 
