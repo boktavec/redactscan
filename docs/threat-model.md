@@ -123,6 +123,17 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 
 Accepted risks: a fatal signal can leave a hidden `.redactscan-*.tmp` with redacted bytes; the directory fsync is best effort; inherited ACLs can widen access; other users can pre-create the destination in shared directories (no-clobber refuses), and in a group- or world-writable directory without the sticky bit they can also rename the closed temp file away and plant their own under its name before link or rename (equivalent risk); hard links to a replaced destination keep the old content; filesystems without hard links refuse no-clobber writes; root writes a root-owned file.
 
+### Directory primitives (`safefs.OpenDirRoot`, `safefs.OpenChildDir`)
+
+Building blocks for directory ingestion (see ADR 0004 and `docs/features/recursive-ingest/spec.md`). No walker uses them yet.
+
+- **`OpenDirRoot(path)`** opens a directory reached without a symlink in any typed component (same rules as `OpenRegular`) and returns it with an `os.Root` pinned through the verified descriptor. A regular file or FIFO root is `ErrNotDir` (the open uses `O_DIRECTORY|O_NONBLOCK`, so a FIFO cannot hang it); a symlink is `ErrSymlink`.
+- **`OpenChildDir(parent, name, want)`** opens one component through the parent root with `O_DIRECTORY|O_NONBLOCK`, requires it to be the same file as the caller's `Lstat` result, and builds the child root from that descriptor. Any swap to a different object (FIFO, symlink to a FIFO or to another directory, a different directory, removal, an escaping link) is `ErrChanged`. `OpenDirRoot` also rejects `""` and NUL paths before any I/O.
+- **Never `Root.OpenRoot(name)` for traversal.** It opens without `O_DIRECTORY` and `O_NONBLOCK`, so a directory swapped for a FIFO blocks it forever, and it follows a final in-root symlink.
+- **Fixed error text,** as for the other `safefs` functions: no path, entry name or OS text.
+
+Accepted risks: a swap to a symlink resolving to the same directory is indistinguishable from the original and is listed; a directory moved out of the root while its descriptor is held is still usable (it is listed under its old name); the primitives do not stay on one filesystem or bound a tree's size, which is the walker's job.
+
 ## CLI (`cmd/redactscan`, `internal/cli`)
 
 `redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]` runs `redactor.Redact` over a file or stdin. With FILE the result goes to `<name>_cleaned<ext>` beside FILE (mode 0600, no clobber unless `-force`); with stdin, or with `-stdout`, it goes to stdout. See `docs/features/redact-command/spec.md` (superseded for FILE output) and `docs/features/cleaned-file-output/spec.md`.

@@ -334,7 +334,8 @@ func TestErrorTextLeaksNothing(t *testing.T) {
 	if err := os.Chmod(locked, 0); err != nil {
 		t.Fatal(err)
 	}
-	_, err = OpenRegular(locked)
+	lf, err := OpenRegular(locked) // succeeds when running as root
+	closeIfOpen(lf, err)
 	record(locked, err)
 
 	// A path component that is a regular file: ENOTDIR text must not leak either.
@@ -356,6 +357,12 @@ func TestErrorTextLeaksNothing(t *testing.T) {
 	}
 }
 
+func closeIfOpen(f *os.File, _ error) {
+	if f != nil {
+		_ = f.Close()
+	}
+}
+
 func fdCount(t *testing.T) int {
 	t.Helper()
 	entries, err := os.ReadDir("/dev/fd")
@@ -370,7 +377,7 @@ func TestOpenRegularLeaksNoDescriptors(t *testing.T) {
 	attempts := map[string]func(t *testing.T){}
 	for _, tc := range refusalCases(t) {
 		path := tc.setup(t, dir)
-		attempts[tc.name] = func(t *testing.T) { _, _ = openWithTimeout(t, path) }
+		attempts[tc.name] = func(t *testing.T) { closeIfOpen(openWithTimeout(t, path)) }
 	}
 	attempts["missing"] = func(*testing.T) { _, _ = OpenRegular(filepath.Join(dir, "missing")) }
 	for _, tc := range swapCases(t) {
@@ -378,7 +385,7 @@ func TestOpenRegularLeaksNoDescriptors(t *testing.T) {
 			path := filepath.Join(dir, "victim")
 			writeFile(t, path, []byte(marker))
 			setHook(t, mustRemoveAndReplace(t, path, func() { tc.swap(path) }))
-			_, _ = openWithTimeout(t, path)
+			closeIfOpen(openWithTimeout(t, path))
 			_ = os.Remove(path)
 		}
 	}

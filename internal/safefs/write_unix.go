@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -73,17 +72,11 @@ func WriteSibling(inputPath string, input fs.FileInfo, outName string, data []by
 	defer func() { _ = dirFile.Close() }()
 
 	beforeOpenRoot()
-	// Open the root through the verified descriptor, not the path: a path
-	// would be resolved again, and a directory swapped for a FIFO would hang.
-	// The SameFile check stays as defense in depth.
-	root, err := os.OpenRoot(fmt.Sprintf("%s/%d", fdDir, dirFile.Fd()))
+	root, err := rootFromDir(dirFile)
 	if err != nil {
-		return false, newOpError("open root", err)
+		return false, err
 	}
 	defer func() { _ = root.Close() }()
-	if !sameAsRoot(dirFile, root) {
-		return false, ErrChanged
-	}
 
 	inFi, err := root.Lstat(base)
 	if err != nil {

@@ -1,0 +1,195 @@
+---
+title: "Recursive directory ingestion: a safe walker that never follows a symlink, never hangs, never leaves the root"
+---
+
+## Outcome
+
+`ingest.Walk(root, ingest.Limits{})` turns an untrusted directory tree into `artifact.Artifact` values for its regular files and `finding.Finding` values for everything it skipped. It never follows a symlink, never blocks on a FIFO, never leaves the root (even if entries are swapped mid-walk), keeps memory bounded, and never lets a partial walk look complete. This is the base a later `scan ./project` command builds on. Story: [REDACT-39](http://localhost:8080/issue/REDACT-39). Full spec: `docs/features/recursive-ingest/spec.md`.
+
+Concrete example: a cloned repo `./project` holds `src/main.go`, `docs -> ../../.ssh`, `loop -> loop`, a FIFO `build/pipe` and a 70-level directory chain. `Walk("./project", ingest.Limits{})` returns an Artifact for `src/main.go` (`Path` = `./project/src/main.go`), Findings `ingest-symlink` (medium, `link_kind=escape`), `ingest-symlink` (low, `link_kind=loop`), `ingest-special-file` (low, `file_type=fifo`), one `ingest-incomplete` (medium, `depth_skipped=1`), and the error `ingest.ErrIncomplete`. A caller that writes `if err != nil { return err }` stops: fail closed by default.
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:** a `scan` CLI command or report format; reading file contents (`MIMEType` and `SHA256` stay empty); `.git` special handling (walked as an ordinary directory); single-file, archive, git or URL ingest; `context.Context` and timeouts; staying on one filesystem; a total path-bytes budget; Windows; escaping control characters in names (output story).
+
+</Callout>
+
+## Delivery: three stacked PRs
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size"]}
+  rows={[
+    ["PR 1", "safefs: OpenDirRoot, OpenChildDir, rootFromDir (refactored out of WriteSibling), ErrNotDir, non-Unix stubs; tests pinning os.Root behavior on macOS and Linux; ADR 0004; threat-model safefs bullets", "about 350 lines plus ADR"],
+    ["PR 2", "artifact.Source* constants; internal/ingest Walk: limits, root validation, sorted listing, regular files, directories, special files, read errors, path cap, ingest-incomplete, ErrIncomplete; interim symlink Finding (medium, unclassified); benchmark", "about 480 lines"],
+    ["PR 3", "Symlink classification against the top root with table test; threat-model ingest section; architecture section 8 note", "about 280 lines incl. docs"]
+  ]}
+/>
+
+## How the walk stays inside the tree
+
+<Diagram id="walk-diagram" frame="show" caption="Every directory is listed from the same descriptor that was verified. Nothing is ever opened by a path that a symlink could redirect.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">1. Pin the root</div>
+    <div class="diagram-node">validate root: not empty, no NUL</div>
+    <div class="diagram-node">safefs.OpenDirRoot: O_DIRECTORY, O_NONBLOCK, no symlink in any typed part</div>
+    <div class="diagram-node">os.OpenRoot(/dev/fd/N) + SameFile</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">2. List one directory</div>
+    <div class="diagram-node">Readdirnames(1024) up to budget + 1</div>
+    <div class="diagram-node">close listing fd</div>
+    <div class="diagram-node">cap at MaxEntries, sort by bytes</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">3. Each entry</div>
+    <div class="diagram-node">path over 1024 bytes: path-too-long</div>
+    <div class="diagram-node">root.Lstat(name)</div>
+    <div class="diagram-node">regular: Artifact</div>
+    <div class="diagram-node">symlink: classify, never follow</div>
+    <div class="diagram-node">fifo, device, socket: special-file</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">4. Descend</div>
+    <div class="diagram-node">depth at MaxDepth: count, skip</div>
+    <div class="diagram-node">safefs.OpenChildDir: OpenFile O_DIRECTORY O_NONBLOCK</div>
+    <div class="diagram-node">SameFile with Lstat, else ingest-changed</div>
+    <div class="diagram-node">child root from fd, recurse</div>
+  </div>
+  <div class="diagram-box result">
+    <span class="diagram-pill">any counter set: one ingest-incomplete (medium) + ErrIncomplete</span>
+    <span class="diagram-pill">Validate fails: ErrInternal, empty result</span>
+    <span class="diagram-pill">errors never carry paths, names or OS text</span>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.result { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 8px; }
+```
+
+</Diagram>
+
+<Callout id="openroot-decision" tone="decision">
+
+**Children are opened with `Root.OpenFile(name, O_RDONLY|O_DIRECTORY|O_NONBLOCK)`, never `Root.OpenRoot(name)`.** `OpenRoot` blocks forever on a FIFO swapped in for a directory and follows a final in-root symlink. With `O_DIRECTORY` a FIFO or a symlink to one fails at once with `ENOTDIR`. An in-root symlink to a directory opens, but the `SameFile` check against the earlier `Lstat` result catches it (`ingest-changed`). **Verified** on macOS with go1.27.2 using a scratch probe: `OpenRoot(fifo)` hung for more than 2 s; `OpenFile` with `O_DIRECTORY` returned `ENOTDIR` for both FIFO cases; for the in-root symlink, `sameAsLstat=false`. **Assumed** for Linux until step 1 pins it with tests.
+
+</Callout>
+
+## API
+
+<Code
+  id="api-code"
+  filename="internal/ingest/ingest.go"
+  language="go"
+  code={"const (\n\tDefaultMaxDepth   = 64\n\tDefaultMaxEntries = 100_000\n\tMaxMaxDepth       = 256       // one open descriptor per level\n\tMaxMaxEntries     = 1_000_000\n\tMaxPathBytes      = 1024      // macOS PATH_MAX; applied on every OS\n)\n\ntype Limits struct {\n\tMaxDepth   int // 0 means DefaultMaxDepth; negative or > MaxMaxDepth is ErrInvalidLimits\n\tMaxEntries int // 0 means DefaultMaxEntries; counts every directory entry\n}\n\ntype Result struct {\n\tArtifacts []artifact.Artifact\n\tFindings  []finding.Finding\n}\n\nvar (\n\tErrIncomplete    = errors.New(\"ingest: scan incomplete\") // partial Result; never clean\n\tErrInvalidLimits = errors.New(\"ingest: invalid limits\")\n\tErrInvalidRoot   = errors.New(\"ingest: invalid root\")\n\tErrInternal      = errors.New(\"ingest: internal error\")\n)\n\nfunc Walk(root string, lim Limits) (Result, error)\n\n// internal/safefs (PR 1)\nvar ErrNotDir = errors.New(\"safefs: not a directory\")\nfunc OpenDirRoot(path string) (*os.File, *os.Root, error)\nfunc OpenChildDir(parent *os.Root, name string, want fs.FileInfo) (*os.File, *os.Root, error)"}
+/>
+
+Artifacts: `ID = "a-<n>"` in walk order (stable for an unchanged tree because each directory is sorted); `Path` = root as typed (trailing `/` trimmed, `/` kept, no `Clean`) + `/` + `RelativePath`, so `safefs.OpenRegular` re-checks it independently; `RelativePath` and `Name` are substrings of `Path`; `Size` from `Lstat`; `Source.Type = artifact.SourceDirectory`. Fatal errors (`ErrInvalidRoot`, `ErrInvalidLimits`, `ErrInternal`, `safefs.ErrSymlink`, `safefs.ErrNotDir`, `ErrChanged`, `ErrUnsupportedPlatform`) return an empty `Result`. The only non-fatal error is `ErrIncomplete`.
+
+## Findings
+
+<Table
+  id="findings-table"
+  columns={["Kind", "Severity", "Metadata", "Makes walk incomplete"]}
+  rows={[
+    ["ingest-symlink", "escape medium, loop low, dangling info, in-root info, unknown medium", "link_kind; errno (int) for unknown", "no"],
+    ["ingest-special-file", "low", "file_type: fifo, device, socket, irregular", "no"],
+    ["ingest-read-error", "medium for open dir / list dir, low for lstat", "op", "yes"],
+    ["ingest-changed", "medium", "none", "yes"],
+    ["ingest-path-too-long", "medium", "none", "yes"],
+    ["ingest-incomplete", "medium (exactly one, last)", "depth_skipped, entries_capped, read_errors, changed, path_too_long", "summary"]
+  ]}
+/>
+
+All Findings: `ID = "<kind>-<n>"`, `Category = "ingest"`, fixed `Title` and `Description`, empty `ArtifactID`, `File` = the untrusted relative path (display only). Link targets are never recorded anywhere. Every Artifact and Finding passes `Validate` before it is appended; a failure is a bug and returns `ErrInternal`.
+
+## Symlink classification (PR 3)
+
+Classification uses `top.Stat(rel)` on the **top** root with the slash-joined relative path. The child root would report an in-root sibling link such as `a/b/c -> ../d` as an escape.
+
+<Table
+  id="symlink-table"
+  columns={["top.Stat(rel)", "link_kind", "Severity"]}
+  rows={[
+    ["nil", "in-root", "info"],
+    ["errors.Is ELOOP (also chains over the link limit)", "loop", "low"],
+    ["errors.Is fs.ErrNotExist", "dangling", "info"],
+    ["*fs.PathError with a non-Errno inner error (\"path escapes from parent\", empty target), or EXDEV", "escape", "medium"],
+    ["anything else, such as EACCES on a middle component", "unknown, with errno", "medium"]
+  ]}
+/>
+
+**Verified** on macOS with go1.27.2 using a scratch probe: in-root returns nil; dangling matches `fs.ErrNotExist`; self and two-link loops match `ELOOP`; relative, absolute, chained and missing-target escapes return a `*fs.PathError` wrapping an unexported `errors.errorString`, not an `Errno`. **Assumed:** Linux behaves the same, and the `EXDEV` mapping only covers the case where it does not. Step 1 pins this in a Linux container and stops for re-planning if the table cannot cover what it finds.
+
+## Files
+
+<FileTree
+  id="files-tree"
+  entries={[
+    { path: "internal/safefs/dir_unix.go", change: "added", note: "PR 1. OpenDirRoot, OpenChildDir, rootFromDir (darwin || linux)." },
+    { path: "internal/safefs/dir_other.go", change: "added", note: "PR 1. Stubs returning ErrUnsupportedPlatform." },
+    { path: "internal/safefs/safefs.go", change: "modified", note: "PR 1. ErrNotDir." },
+    { path: "internal/safefs/write_unix.go", change: "modified", note: "PR 1. WriteSibling uses rootFromDir; behavior unchanged." },
+    { path: "internal/safefs/root_semantics_test.go", change: "added", note: "PR 1. Pins os.Root Stat, OpenFile O_DIRECTORY, Readdirnames and fd-root behavior on both OSes." },
+    { path: "internal/safefs/dir_test.go", change: "added", note: "PR 1. Root and child cases, FIFO swaps with 2 s timeout, fd counts, error text." },
+    { path: "internal/artifact/artifact.go", change: "modified", note: "PR 2. SourceFile, SourceDirectory, SourceArchive, SourceGit, SourceDownload." },
+    { path: "internal/ingest/ingest.go", change: "added", note: "PR 2. Package doc (fail-closed and untrusted-name contracts), Limits, Result, errors, Walk." },
+    { path: "internal/ingest/walk.go", change: "added", note: "PR 2. Listing, entry handling, counters, Validate gate, test seams." },
+    { path: "internal/ingest/symlink.go", change: "added", note: "PR 3. Classification against the top root." },
+    { path: "internal/ingest/walk_test.go", change: "added", note: "PR 2. FR1-FR16 except FR6; benchmark in bench_test.go." },
+    { path: "internal/ingest/symlink_test.go", change: "added", note: "PR 3. Classification table." },
+    { path: "docs/adr/0004-directory-ingest-pinned-root.md", change: "added", note: "PR 1. os.Root for traversal vs ADR 0002, OpenRoot FIFO hazard, ErrIncomplete contract." },
+    { path: "docs/threat-model.md", change: "modified", note: "PR 1 safefs bullets; PR 3 Directory ingestion section, caller constraints, accepted risks." },
+    { path: "docs/architecture.md", change: "modified", note: "PR 3. Section 8 note on directory ingest." }
+  ]}
+/>
+
+## Accepted risks
+
+<Callout id="risks-callout" tone="risk">
+
+- **Directory moved out of the root while its descriptor is held:** it is listed once under its old relative path. The walk never resolves a name outside the root.
+- **Hard links:** a hard link to a file outside the tree is listed as a regular file. Future archive extraction must refuse hard links and absolute or escaping link targets.
+- **Mount points:** the walk crosses them. Scanning `/` lists `/proc/self/environ` as a regular file (listed only, never read here) and skips `/dev` devices.
+- **No timeout:** a hung network filesystem can block the walk.
+- **Budget cut inside a directory:** which entries are kept depends on filesystem order. The walk is reported incomplete.
+- **Memory:** worst case about 130 MiB (100,000 Artifacts at about 1.3 KiB with 1024-byte paths; **Assumed**). The benchmark records the measured cost.
+- **Descriptors:** at most `MaxDepth + 2`. `MaxDepth` near the 256 cap can hit the macOS default soft limit (**Assumed** 256). That surfaces as a read error and an incomplete walk, not a crash.
+
+</Callout>
+
+## Implementation steps
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "1. Pin os.Root behavior on macOS and Linux (PR 1)", note: "root_semantics_test.go; run in golang:1.27 container. Stop and re-plan if Linux differs beyond the classification table." },
+    { id: "step-2", label: "2. rootFromDir, ErrNotDir, OpenDirRoot, OpenChildDir, stubs (PR 1)", note: "Depends on 1. Existing safefs tests green; task cross green." },
+    { id: "step-3", label: "3. Tests for the safefs primitives (PR 1)", note: "Depends on 2. FIFO and symlink-to-FIFO swaps within 2 s, in-root symlink swap, file and FIFO roots, symlinked root and parent, /tmp vs /tmp/, fd counts, marker-free errors." },
+    { id: "step-4", label: "4. ADR 0004 and threat-model safefs bullets (PR 1)", note: "Depends on 2-3." },
+    { id: "step-5", label: "5. artifact.Source* constants (PR 2)", note: "Field comment update and a trivial test." },
+    { id: "step-6", label: "6. ingest API, validation and walk (PR 2)", note: "Depends on PR 1 and 5. Interim symlink Finding: medium, no link_kind." },
+    { id: "step-7", label: "7. Walker tests and benchmark (PR 2)", note: "Depends on 6. Mode-000 dir, forced list error, forced change, path cap boundary, depth and entry limits, exactly one ingest-incomplete, clean tree has none, Validate on everything, Paths open with OpenRegular, deterministic repeat, fd counts, Linux run." },
+    { id: "step-8", label: "8. Symlink classification (PR 3)", note: "Depends on PR 2. Replaces the interim Finding." },
+    { id: "step-9", label: "9. Classification table test (PR 3)", note: "Depends on 8. Nested sibling in-root, ../../.. and absolute escapes, dangling, loops, empty target, EACCES middle component; no link target in any field; Linux run." },
+    { id: "step-10", label: "10. Threat model and architecture docs (PR 3)", note: "Depends on 8-9. Caller constraints: incomplete is never clean, names are untrusted, open Path only via OpenRegular." }
+  ]}
+/>
+
+## Verification
+
+- `task test` after each step. Before each PR is marked ready, `task verify` must pass: fmt, lint, test, cross, gosec, govulncheck, gitleaks.
+- Linux run in each PR, since CI runs no Go tests: `docker run --rm -v "$PWD":/src -w /src golang:1.27 go test ./...`, with the result recorded in the PR.
+- Break-the-guard check, then revert. Each change must make its matching test fail:
+  - drop `O_DIRECTORY` in `OpenChildDir`
+  - drop the `SameFile` check
+  - classify against the child root
+  - drop the `ingest-incomplete` Finding
+- Manual check: build a temp tree with an escaping symlink, a loop, a FIFO and a deep chain. Run a small `go test -run` that prints Finding kinds and counters, and confirm `ErrIncomplete` is returned with no hang.
+- Reviews: `staff-engineering-reviewer` and `security-reviewer` on each PR.

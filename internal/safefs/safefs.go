@@ -1,7 +1,8 @@
 // Package safefs is the filesystem trust boundary for input and output files.
 // OpenRegular opens only regular files reached without following a symlink.
 // WriteSibling creates a new file beside an input through a pinned directory,
-// without clobbering unless asked. Both refuse everything unsafe with a fixed
+// without clobbering unless asked. OpenDirRoot and OpenChildDir open
+// directories for traversal as pinned roots. All refuse everything unsafe with a fixed
 // error. Error text never contains the path, file contents or OS error text.
 package safefs
 
@@ -14,6 +15,7 @@ import (
 var (
 	ErrSymlink             = errors.New("safefs: symlink refused")
 	ErrNotRegular          = errors.New("safefs: not a regular file")
+	ErrNotDir              = errors.New("safefs: not a directory")
 	ErrChanged             = errors.New("safefs: file changed during open")
 	ErrUnsupportedPlatform = errors.New("safefs: unsupported platform")
 	ErrInvalidName         = errors.New("safefs: invalid output name")
