@@ -50,7 +50,8 @@ func (c counters) incomplete() bool {
 }
 
 type walker struct {
-	prefix     string // root with a trailing slash; relative paths are appended
+	top        *os.Root // pinned walk root, used to classify symlinks
+	prefix     string   // root with a trailing slash; relative paths are appended
 	maxDepth   int
 	maxEntries int
 	entries    int
@@ -113,8 +114,7 @@ func (w *walker) entry(r *os.Root, name, path string, depth int) {
 			Source:       artifact.SourceMetadata{Type: artifact.SourceDirectory},
 		})
 	case fs.ModeSymlink:
-		// Never opened or listed. PR 3 classifies it; until then fail closed.
-		w.addFinding(kindSymlink, finding.SeverityMedium, rel, nil)
+		w.addSymlink(rel)
 	case fs.ModeDir:
 		w.descend(r, name, path, rel, depth, fi)
 	default:

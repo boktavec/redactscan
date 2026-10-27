@@ -188,8 +188,8 @@ func TestSymlinksAreReportedNotFollowed(t *testing.T) {
 	var files []string
 	for _, f := range findingsOf(res, "ingest-symlink") {
 		files = append(files, f.File)
-		if f.Severity != finding.SeverityMedium || f.Metadata != nil {
-			t.Errorf("%s: severity %v, metadata %v; want medium and none", f.File, f.Severity, f.Metadata)
+		if _, ok := f.Metadata["link_kind"]; !ok {
+			t.Errorf("%s: no link_kind in %v", f.File, f.Metadata)
 		}
 	}
 	if want := []string{"dangling", "escape", "file-link", "inroot", "loop"}; !reflect.DeepEqual(files, want) {

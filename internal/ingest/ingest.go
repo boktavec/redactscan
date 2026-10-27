@@ -75,7 +75,7 @@ func Walk(root string, lim Limits) (Result, error) {
 	}
 	defer func() { _ = top.Close() }()
 
-	w := &walker{prefix: pathPrefix(root), maxDepth: maxDepth, maxEntries: maxEntries}
+	w := &walker{top: top, prefix: pathPrefix(root), maxDepth: maxDepth, maxEntries: maxEntries}
 	w.walkDir(dir, top, w.prefix, 0)
 	return w.result()
 }

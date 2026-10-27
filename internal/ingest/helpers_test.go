@@ -161,6 +161,7 @@ func pathOfLen(t *testing.T, base string, prefixLen, total int, leafDir bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = r.Close() }() // closes the current level, also on t.Fatal
 	for remaining > 255 {
 		dir := strings.Repeat("d", 100)
 		if err := r.Mkdir(dir, 0o700); err != nil {
@@ -186,5 +187,4 @@ func pathOfLen(t *testing.T, base string, prefixLen, total int, leafDir bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = r.Close()
 }
