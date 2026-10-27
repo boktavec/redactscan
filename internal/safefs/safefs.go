@@ -42,7 +42,8 @@ func (e *NotRegularError) Error() string {
 
 func (e *NotRegularError) Is(target error) bool { return target == ErrNotRegular }
 
-func fileType(m fs.FileMode) FileType {
+// TypeOf names the kind of file a mode describes.
+func TypeOf(m fs.FileMode) FileType {
 	switch {
 	case m.IsDir():
 		return TypeDirectory

@@ -192,7 +192,7 @@ func checkDestination(root *os.Root, outName string, replace bool) error {
 	case fi.Mode()&fs.ModeSymlink != 0:
 		return ErrSymlink
 	case !fi.Mode().IsRegular():
-		return &NotRegularError{Type: fileType(fi.Mode())}
+		return &NotRegularError{Type: TypeOf(fi.Mode())}
 	}
 	return nil
 }
