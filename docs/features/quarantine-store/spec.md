@@ -1,11 +1,11 @@
 # Quarantine store: spec
 
 Story: REDACT-56 "Quarantine store: layout, metadata and permissions".
-Status: approved design (user, 2026-10-27), security-reviewer findings incorporated.
+Status: approved design (user, 2026-10-27), security-reviewer findings incorporated. Implemented in four PRs (Read, Verify and the threat-model section in PR 4).
 Depends on: REDACT-35 (artifact/finding models), REDACT-10 (safefs).
 Consumers: REDACT-57 (list/inspect), REDACT-58 (release/delete), REDACT-59/60 (watcher routing), REDACT-49 (policy).
 Visual plan: `plans/quarantine-store/plan.mdx`.
-ADR: 0005 (draft notes in section 5.1; written in PR 1).
+ADR: 0005 (`docs/adr/0006-quarantine-store.md`; section 5.1 holds the original notes).
 
 Claims about Go, OS or library behaviour are labelled **Verified** (with how) or **Assumed**.
 

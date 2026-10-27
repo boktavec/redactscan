@@ -14,3 +14,5 @@ func (*Store) Close() error       { return nil }
 func (*Store) Repaired() []string { return nil }
 
 func (*Store) Put(*os.File, Input) (string, error) { return "", ErrUnsupportedPlatform }
+func (*Store) Read(string) (Metadata, error)       { return Metadata{}, ErrUnsupportedPlatform }
+func (*Store) Verify(string) error                 { return ErrUnsupportedPlatform }

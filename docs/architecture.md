@@ -417,6 +417,8 @@ Storage (`internal/quarantine`; design in `docs/features/quarantine-store/spec.m
 
 Directories are exactly 0700 and files exactly 0600. Symlinks and directories owned by another user are refused, and the store refuses to run as root unless explicitly allowed.
 
+The package provides `Open`, `Put`, `Read` (strict metadata, no content, no repair of entries) and `Verify` (re-hash of content against the metadata). The CLI commands below are not built yet. Controls, caller constraints and accepted risks are in `docs/threat-model.md` (Quarantine store).
+
 CLI:
 
 ```bash
