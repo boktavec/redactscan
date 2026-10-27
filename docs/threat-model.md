@@ -127,6 +127,49 @@ Formats and ranges marked Assumed in the spec (AWS key shapes, GitHub token leng
 
 Accepted risks: a fatal signal can leave a hidden `.redactscan-*.tmp` with redacted bytes; the directory fsync is best effort; inherited ACLs can widen access; other users can pre-create the destination in shared directories (no-clobber refuses), and in a group- or world-writable directory without the sticky bit they can also rename the closed temp file away and plant their own under its name before link or rename (equivalent risk); hard links to a replaced destination keep the old content; filesystems without hard links refuse no-clobber writes; root writes a root-owned file.
 
+### Directory primitives (`safefs.OpenDirRoot`, `safefs.OpenChildDir`)
+
+Building blocks for directory ingestion (see ADR 0004 and `docs/features/recursive-ingest/spec.md`). `internal/ingest` uses them.
+
+- **`OpenDirRoot(path)`** opens a directory reached without a symlink in any typed component (same rules as `OpenRegular`) and returns it with an `os.Root` pinned through the verified descriptor. A regular file or FIFO root is `ErrNotDir` (the open uses `O_DIRECTORY|O_NONBLOCK`, so a FIFO cannot hang it); a symlink is `ErrSymlink`.
+- **`OpenChildDir(parent, name, want)`** opens one component through the parent root with `O_DIRECTORY|O_NONBLOCK`, requires it to be the same file as the caller's `Lstat` result, and builds the child root from that descriptor. Any swap to a different object (FIFO, symlink to a FIFO or to another directory, a different directory, removal, an escaping link) is `ErrChanged`. `OpenDirRoot` also rejects `""` and NUL paths before any I/O.
+- **Never `Root.OpenRoot(name)` for traversal.** It opens without `O_DIRECTORY` and `O_NONBLOCK`, so a directory swapped for a FIFO blocks it forever, and it follows a final in-root symlink.
+- **Fixed error text,** as for the other `safefs` functions: no path, entry name or OS text.
+
+Accepted risks: a swap to a symlink resolving to the same directory is indistinguishable from the original and is listed; a directory moved out of the root while its descriptor is held is still usable (it is listed under its old name); the primitives do not stay on one filesystem or bound a tree's size, which is the walker's job.
+
+## Directory ingestion (`internal/ingest`)
+
+`ingest.Walk(root, Limits)` lists a directory tree as `artifact.Artifact` values (regular files) and `finding.Finding` values (everything skipped). It reads no file contents. See ADR 0004 and `docs/features/recursive-ingest/spec.md`. The tree is untrusted.
+
+### Controls
+
+- **Pinned root, no symlink followed.** The root is opened with `safefs.OpenDirRoot`; every entry is `Lstat`ed through the pinned `os.Root`, and each child directory is opened with `safefs.OpenChildDir` (`O_DIRECTORY|O_NONBLOCK` plus a `SameFile` check against the `Lstat` result). Symlinks, FIFOs, sockets and devices are never opened or listed. A directory swapped mid-walk is reported as `ingest-changed`.
+- **Symlink classification.** Each symlink gives one `ingest-symlink` Finding with `link_kind` `escape` (medium), `loop` (low), `dangling` (info), `in-root` (info) or `unknown` (medium, plus an integer `errno`). It is resolved with `Stat` on the top root and the slash-joined relative path (a child root would report in-root sibling links as escapes); `os.Root` refuses an escape before touching anything outside the tree. The link target is never recorded in a Finding or error.
+- **Limits.** Depth 64 and 100,000 entries by default (caps 256 and 1,000,000; every name counts); paths longer than 1015 bytes are skipped. Memory and descriptors are bounded (about depth + 2 descriptors). Symlink classification CPU is not bounded by these limits (see accepted risks).
+- **Fail closed.** Depth-skipped directories, entries cut by the limit, read errors, changed directories and over-long paths make `Walk` return the partial result with `ErrIncomplete` and one `ingest-incomplete` Finding. Symlinks and special files alone do not.
+- **Fixed error text.** No path, name or OS text in any error or Finding description.
+
+### Constraints for callers
+
+- **Incomplete is never clean.** A result with `ErrIncomplete` is partial; never report it as a complete or clean scan.
+- **Names are untrusted.** `RelativePath`, `Name` and `Finding.File` may contain control, ANSI and bidi characters or invalid UTF-8; escape them for display and never join them to a directory. Open `Artifact.Path` only with `safefs.OpenRegular`.
+- **`link_kind` is a label, not a guarantee.** `loop` also covers a chain longer than the OS or `os.Root` link limit (about 8 links), not only a cycle. A symlink with an empty target (creatable on macOS only) is labelled `escape`. `unknown` means resolution failed for another reason, for example `errno=EACCES` on a directory without search permission.
+- **Future archive extractor.** It must refuse hard links and absolute or escaping link targets; directory ingest does not detect hard links.
+
+### Accepted risks
+
+- **Hard links** to files outside the tree are listed as regular files (see Safe file opening).
+- **Directory moved out of the root** while its descriptor is held is listed once under its old relative path. A swap to a symlink that resolves to the same directory is indistinguishable from the original and is listed.
+- **Mount points** are crossed. Scanning `/` reaches `/proc` (for example `/proc/self/environ` as a regular file) and `/dev` (devices skipped). Listing reads no content. `-xdev` is a follow-up.
+- **No timeout, no `context`.** A hung network filesystem can block the walk, and so can a hostile tree (next item). A `context`/timeout is a follow-up.
+- **Symlink classification CPU cost (user-accepted risk).** `Root.Stat` resolves link targets in user space with one `openat(O_NOFOLLOW|O_DIRECTORY)` plus close per target component, across up to 8 chained links. The cost is bounded by target length times hops, not by `MaxDepth` or `MaxEntries`: the walker skips directories deeper than `MaxDepth`, but they still exist and `Stat` walks them. A hostile tree of about 480 nested directories plus up to about 100,000 links that each point deep makes the walk slow. Measured per link: macOS arm64 21.7 ms for a 480-level target versus 4.8 us for a short one (about 4,500x; 5,000 links take about 108 s); Linux (`golang:1.27`) 270 us versus 3.3 us (about 80x). Extrapolated to 100,000 links: about 36 min on macOS and about 27 s on Linux (extrapolated; chaining several hops multiplies it further, assumed, not measured). No confidentiality or integrity impact; a CI job that times out fails closed. The user accepted this risk (no code bound, no child-root-first optimisation). Recommended hardening before running on untrusted uploads or in an MCP service: a classification step budget (a deterministic step count; links past the budget become `unknown`, medium) alongside the `context` follow-up.
+- **Mid-walk ancestor swap.** An ancestor directory swapped or moved while the walk runs can only mislabel a link: classification re-resolves from the top root and stays confined to it, so it cannot escape.
+- **Stale `Size`** is informational; content readers must re-check.
+- **Entries cut by `MaxEntries`** inside a directory depend on filesystem order; the walk is reported incomplete.
+- **Descriptors.** `MaxDepth` near 256 can hit `EMFILE` under a 256-descriptor soft limit; it surfaces as `ingest-read-error` (incomplete), not a crash. During symlink classification the count is briefly `MaxDepth + 4`. An `EMFILE` during classification degrades that link's label to `unknown` (errno 24, medium) and does not make the walk incomplete.
+- **Memory.** Measured on macOS arm64: about 1.04 KiB (1.07 kB) allocated per Artifact with short paths and about 2.1 KiB at 1015-byte paths, so a walk of 100,000 maximum-length Artifacts allocates about 215 MB (allocation, not retained). Retained heap is about 275 B per short-path Artifact (measured) and about 126 MiB at the cap with 1015-byte paths (extrapolated). Findings are similar in size and are also bounded by `MaxEntries`. There is no total path-bytes budget.
+
 ## CLI (`cmd/redactscan`, `internal/cli`)
 
 `redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]` runs `redactor.Redact` over a file or stdin. With FILE the result goes to `<name>_cleaned<ext>` beside FILE (mode 0600, no clobber unless `-force`); with stdin, or with `-stdout`, it goes to stdout. See `docs/features/redact-command/spec.md` (superseded for FILE output) and `docs/features/cleaned-file-output/spec.md`.

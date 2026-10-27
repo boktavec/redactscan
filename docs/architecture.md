@@ -215,6 +215,10 @@ sentinel scan package.zip
 sentinel scan https://github.com/org/repo
 ```
 
+### Directory
+
+`internal/ingest` implements directory ingestion: `ingest.Walk(root, Limits)` lists a tree as artifacts for regular files and findings for everything skipped (symlinks classified as escape, loop, dangling, in-root or unknown; special files). It never opens or lists through a symlink and never leaves the root and reads no file contents. Defaults are depth 64 and 100,000 entries. If a limit is hit or an entry cannot be read, `Walk` returns the partial result with `ErrIncomplete`, which callers must never treat as a clean scan. See `docs/threat-model.md` and `docs/features/recursive-ingest/spec.md`.
+
 ### Git
 
 For `sentinel clone`:

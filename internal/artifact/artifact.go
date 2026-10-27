@@ -49,10 +49,18 @@ type Artifact struct {
 	Metadata map[string]any
 }
 
+// Source types for SourceMetadata.Type.
+const (
+	SourceFile      = "file"
+	SourceDirectory = "directory"
+	SourceArchive   = "archive"
+	SourceGit       = "git"
+	SourceDownload  = "download"
+)
+
 // SourceMetadata records where an Artifact came from.
 type SourceMetadata struct {
-	// Type is one of file, directory, archive, git, download (typed constants
-	// come in the ingest story).
+	// Type is one of the Source constants.
 	Type string
 	// URI: ingest stores only scheme, host and path. It drops userinfo, query
 	// and fragment and never stores the URL the user typed.
