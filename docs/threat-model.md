@@ -233,3 +233,45 @@ Scanned content is untrusted, and so is scanner output, because it is derived fr
 - A file modified in place during the read can yield mixed content.
 - Invalid-finding floods are not capped: only accepted findings count toward `MaxFindings`, so a scanner returning many invalid findings costs about 1.7 s per million secret-shaped ones (measured). Deferred to REDACT-37 or REDACT-39.
 - A legitimate finding whose ID, Title, File or Evidence resembles a covered secret format is dropped as `invalid finding` (fail closed).
+
+## Live log sources (`internal/logs`)
+
+`logs.FileSource` follows one log file like `tail -F` and delivers complete lines to a later redaction pipeline. See `docs/features/file-log-source/spec.md` and ADR 0005. The package is not wired to the CLI yet.
+
+### Trust boundary
+
+The adapter is where untrusted file state (path, content, line lengths) enters a long-running stream. `LogEntry.Line` holds raw, unredacted data.
+
+### Controls
+
+- **Safe open.** The file is opened through `safefs.OpenRegular`: no symlink in any typed component, regular files only, no blocking on a FIFO. A refusal is returned from `Read` before any channel exists.
+- **Complete lines only.** A line is emitted only when its `\n` has been read and it is within `MaxLineBytes` (default 64 KiB, at most 1 MiB). A line over the cap, a pending line cut off by truncation or rotation, and the fragment of a line already in progress when reading starts each become one marker with no content, so a secret is never split across what the redactor sees.
+- **Bounded memory.** Per `Read`: at most `MaxLineBytes` for the pending line plus a fixed 32 KiB buffer. Lines are found by scanning the fixed buffer; no `bufio.Scanner`, `ReadBytes` or `io.ReadAll`. The channel is unbuffered, so a slow consumer slows reading.
+- **Safe reopen on rotation.** Each tick compares `Lstat(path)` with `Fstat` of the held descriptor (never with an earlier `Lstat`) using `os.SameFile`. On a mismatch the old file is read only up to its size at detection, the descriptor is closed, and the path is reopened through `safefs.OpenRegular` (symlink, FIFO, directory and device are refused). The new file must have the same owner uid as the first file and exactly one hard link, or the stream ends with `ErrReopenRefused`. This closes the planted-hard-link and foreign-file gaps at the one point an attacker controls.
+- **Fixed error text.** No error contains the path, the label, line content or OS error text. OS errors unwrap to a bare `syscall.Errno`. The label is validated (bounded UTF-8, no control, format or line and paragraph separator characters) and `Name()` never returns the path.
+- **Fail closed.** Every reopen refusal, an `Lstat` error other than not-found, and a `Fstat` or read error on the held descriptor end the stream with one final `Err` entry (the descriptor is closed first) and then close the channel. The read-error path cannot be triggered on a local filesystem without fault injection, so it is verified by inspection, as safefs did for `fstat`.
+- **Resources.** One descriptor and one goroutine per `Read`; both are released when the channel closes. Every send also waits on `ctx.Done()`, and the read loop checks `ctx` before each read, so cancellation also stops reading a region that produces no entries.
+- **Never executed.** The package does not import `os/exec` and logs nothing.
+
+### Constraints for callers
+
+- Redact with context across lines (a PEM block or wrapped token spans several entries): the guarantee is "no partial line", not "a secret stays on one line".
+- Never expose `Line` outside the process (MCP, logs) before redaction.
+- Escape CR, NUL, ANSI and bidi characters before display.
+- Bound concurrent `Read` calls in any MCP layer: each costs one descriptor, one goroutine and up to `MaxLineBytes` plus 32 KiB.
+- Always cancel `ctx`. A consumer that stops reading without cancelling pins one goroutine and one descriptor; the adapter cannot detect it.
+- Never use `Dropped` as a size for allocation. It is a lower bound on the discarded bytes.
+
+### Accepted risks
+
+- **Huge newline-free regions.** While `ctx` is live, reading a very large file or sparse region without newlines costs CPU, and the truncation and rotation checks wait until that read finishes. There is no per-tick byte cap.
+- **No hard-link check on the first open.** A hard link created before `Read` is not detected; this matches the safefs accepted risk. macOS has no `protected_hardlinks`, so any user who can write the log directory can plant a link to a file they cannot read. The file is read with the invoking user's permissions, so when the tool runs as root or another privileged user, a link planted before `Read` can pull that file's content into a less-trusted downstream consumer (an MCP server or AI agent). Rotation reopens are protected by the link-count check.
+- **`copytruncate` regrowth.** If the file is truncated and grows past the read offset within one poll interval, the truncation is missed and reading resumes mid-line in the new content. Unlike the start position there is no fragment skip, so a mid-line fragment can be emitted as a line.
+- **`/proc` and `/sys` files** report size 0, so the content is re-emitted every poll. Unsupported input.
+- **Blocking I/O on network filesystems.** A `Fstat` or read that hangs on NFS or FUSE blocks the loop; cancellation takes effect afterwards.
+- **Lost lines around rotation.** Two rotations within one poll interval skip the intermediate file, and bytes a writer appends to the old file after the rotation was detected (past its size at detection) are not read.
+- **Ownership or hard-link changes end the stream.** A rotation that changes the file owner, or a log that legitimately has a second hard link, is refused with `ErrReopenRefused`. This is an operational cost of the checks.
+- **Inode identity on NFS, FUSE and overlayfs.** `os.SameFile` may report a rotation falsely or miss one.
+- **A blocking `Lstat`** on a hung network filesystem blocks the loop until it returns.
+- **A removed path with no new file** keeps the held descriptor being read with no error; after a rotation drain with no new file the source waits, holding no descriptor, until the path reappears.
+- **Cross-line secret splitting** (see the caller constraints).

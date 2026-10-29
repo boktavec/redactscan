@@ -597,6 +597,8 @@ JournaldSource
 
 Keep logs local and expose only query results to the model.
 
+The first adapter, `FileSource` (`internal/logs`, ADR 0005), fixes the contract the others inherit. `Query{FromStart bool}` always follows the source. A `LogEntry` is one complete line (raw and unredacted, so it must be redacted before it leaves the process), one drop marker for an over-cap or cut-off line, or, as the last entry before the channel closes, a fixed-text `Err`. `Name()` and `LogEntry.Source` are a validated label, never a path. A file is reopened after rotation only through `safefs.OpenRegular`, with the same owner and a single hard link. See `docs/threat-model.md`, "Live log sources".
+
 ---
 
 ## 16. Version Build Order
