@@ -23,20 +23,5 @@ func checkFinding(f finding.Finding, a artifact.Artifact) bool {
 	case len(f.File) > MaxFileBytes, f.Line < 0:
 		return false
 	}
-	return redactorClean(f.ID) && redactorClean(f.Title) && redactorClean(f.File) && redactorClean(f.Evidence)
-}
-
-// redactorClean is true only when the redactor accepts s and finds nothing
-// but label-like text, which is already neutralised output.
-func redactorClean(s string) bool {
-	res, err := redactor.Redact([]byte(s))
-	if err != nil {
-		return false
-	}
-	for kind := range res.Counts {
-		if kind != redactor.KindLabelLike {
-			return false
-		}
-	}
-	return true
+	return redactor.IsClean(f.ID) && redactor.IsClean(f.Title) && redactor.IsClean(f.File) && redactor.IsClean(f.Evidence)
 }
