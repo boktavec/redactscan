@@ -1,0 +1,6 @@
+2026-10-25T10:00:01Z INFO  starting worker
+2026-10-25T10:00:02Z DEBUG aws key=AKIAIOSFODNN7EXAMPLE
+2026-10-25T10:00:02Z DEBUG aws secret=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+2026-10-25T10:00:03Z WARN  github token ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789 used twice: ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789
+2026-10-25T10:00:04Z INFO  pre-existing label text [GITHUB_TOKEN_1] stays suspicious
+2026-10-25T10:00:05Z INFO  done, nothing secret here
