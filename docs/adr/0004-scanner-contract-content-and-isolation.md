@@ -1,6 +1,6 @@
 # ADR 0004: Scanner contract, with content passed in and per-scanner isolation
 
-Status: Accepted (REDACT-36)
+Status: Accepted (REDACT-36). Decisions 1-3 are superseded by [ADR 0007](0007-scanner-bounded-readerat-and-1gib-cap.md) (bounded `io.ReaderAt`, 1 GiB cap); decisions 4-7 stand.
 Date: 2026-10-26
 Spec: `docs/features/scanner-scan-file/spec.md`
 

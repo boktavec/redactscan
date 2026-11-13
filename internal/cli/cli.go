@@ -58,7 +58,7 @@ incomplete), the findings, the failures and a summary; stderr stays empty on
 success and carries only errors that stop the report. Untrusted strings are
 escaped, never printed raw. Flags must come before FILE. BREAKING: the stdout
 format changed, and failure lines and the summary moved from stderr to stdout.
-Files over 10 MiB are not scanned. No scanners are registered yet, so scans
+Files over 1 GiB are not scanned. No scanners are registered yet, so scans
 report incomplete until scanners are added.
 
 Consumers: check the exit code first (0 complete, 1 incomplete, 2 usage, 3

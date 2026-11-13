@@ -1,6 +1,6 @@
 // Package scanner defines the Scanner interface and the Registry that runs
-// scanners over one artifact. It performs no file or network I/O: the caller
-// reads the content once and passes it in (ADR 0004).
+// scanners over one artifact. It opens nothing: the caller opens the content
+// and Run hands scanners a bounded io.ReaderAt over it (ADR 0007).
 //
 // Scanned content is untrusted, and so is scanner output, because it is
 // derived from that content. Registry.Run is fail-closed: anything that stops
@@ -12,13 +12,22 @@
 // A Scanner implementation must:
 //   - not call os.Exit, log.Fatal or runtime.Goexit;
 //   - not start goroutines that outlive Scan or that can panic unrecovered;
-//   - not modify content or a.Metadata (both are shared and read-only; call
+//   - read content only through the ReaderAt it is given: never past size,
+//     never keep it after Scan returns, and never allocate size bytes at once
+//     (a buffering scanner keeps its own small cap);
+//   - not modify a.Metadata (shared and read-only; call
 //     scannertest.AssertNoMutation in its tests);
 //   - use only constant text in panics and errors, never scanned content;
 //   - return only redacted-or-bounded findings, as the finding package
 //     requires;
 //   - check ctx in long loops;
 //   - never execute, load or open anything named by the content.
+//
+// Run wraps the caller's reader in an opaque bounded type, so a scanner cannot
+// reach the underlying file, and replaces read errors, which can carry paths,
+// with fixed text. It reads nothing itself, so the content is read live, once
+// per scanner: a file that changes during the scan can give scanners different
+// bytes, and the caller must detect that.
 //
 // Registry.Run drops a finding that breaks the field contract in check.go
 // (identifier grammars for ID, Category and Metadata keys, size limits, UTF-8,
@@ -30,15 +39,16 @@ package scanner
 
 import (
 	"context"
+	"io"
 
 	"github.com/boktavec/redactscan/internal/artifact"
 	"github.com/boktavec/redactscan/internal/finding"
 )
 
-// Limits. MaxContentSize is an assumed default (ADR 0004).
+// Limits. MaxContentSize is an assumed default (ADR 0007).
 const (
-	MaxContentSize = 10 << 20 // largest content Run scans
-	MaxFindings    = 1000     // accepted findings per Run
+	MaxContentSize = 1 << 30 // largest content Run scans (1 GiB)
+	MaxFindings    = 1000    // accepted findings per Run
 	MaxIDBytes     = 128
 	MaxTitleBytes  = 128
 	MaxFileBytes   = 4096
@@ -54,8 +64,9 @@ type Scanner interface {
 	Name() string
 	// Supports reports whether Scan should run for a.
 	Supports(a artifact.Artifact) bool
-	// Scan returns findings for a. content is shared and read-only.
-	Scan(ctx context.Context, a artifact.Artifact, content []byte) ([]finding.Finding, error)
+	// Scan returns findings for a. r holds exactly size bytes and is valid only
+	// during the call; read it with ReadAt, never past size.
+	Scan(ctx context.Context, a artifact.Artifact, r io.ReaderAt, size int64) ([]finding.Finding, error)
 }
 
 // Reason says why a scanner, or the registry, did not complete cleanly. These
