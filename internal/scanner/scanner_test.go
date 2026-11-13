@@ -188,14 +188,6 @@ func (c *changingName) Scan(context.Context, artifact.Artifact, io.ReaderAt, int
 	return nil, c.err
 }
 
-func TestDefault(t *testing.T) {
-	r, err := Default()
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertFailures(t, r.Run(context.Background(), art, content(), art.Size), Failure{RegistryName, ReasonNoScanner})
-}
-
 func TestRunOrderAndSupports(t *testing.T) {
 	var order []string
 	a := &fake{name: "a", order: &order, findings: []finding.Finding{fnd("a", finding.SeverityLow)}}

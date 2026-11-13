@@ -203,7 +203,7 @@ Accepted risks: a swap to a symlink resolving to the same directory is indisting
 
 ## Scanner (`internal/scanner`, `scan` command)
 
-`redactscan scan FILE` runs every registered scanner over one file and prints findings. See `docs/features/scanner-scan-file/spec.md` and ADR 0004. No production scanners exist yet, so every real scan is incomplete (`no scanner ran`, exit 1). Report output is covered by `docs/features/scan-reports/spec.md` and ADR 0005.
+`redactscan scan FILE` runs every registered scanner over one file and prints findings. See `docs/features/scanner-scan-file/spec.md` and ADR 0004. The only production scanner so far is `hash` (`internal/scanner/builtin`), which reports the SHA-256 as an info finding. Report output is covered by `docs/features/scan-reports/spec.md` and ADR 0005.
 
 ### Trust boundary
 

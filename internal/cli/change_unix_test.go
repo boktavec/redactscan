@@ -21,6 +21,29 @@ func scanWithChange(t *testing.T, path string, modify func()) result {
 	return run([]string{"scan", path}, strings.NewReader(""))
 }
 
+// TestScanRealRegistryDetectsChange checks that the change check wraps the
+// production registry, not only injected fake scanners.
+func TestScanRealRegistryDetectsChange(t *testing.T) {
+	path := writeTemp(t, "content")
+	afterRun = func() {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer func() { _ = f.Close() }()
+		if _, err := f.WriteString("more"); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRun = func() {} })
+	got := run([]string{"scan", path}, strings.NewReader(""))
+	if got.code != exitIncomplete || got.stderr != "" || !strings.Contains(got.stdout, changedLine) ||
+		!strings.Contains(got.stdout, "hash.sha256") {
+		t.Errorf("got %+v", got)
+	}
+}
+
 func TestScanUntouchedFileIsComplete(t *testing.T) {
 	got := scanWithChange(t, writeTemp(t, "content"), func() {})
 	if got.code != 0 || strings.Contains(got.stdout, "changed") {

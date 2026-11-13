@@ -113,14 +113,20 @@ func TestScanHelp(t *testing.T) {
 	}
 }
 
-func TestScanRealDefaultRegistryIsIncomplete(t *testing.T) {
-	path := writeTemp(t, "hello")
-	wantText := "redactscan scan report\nstatus: incomplete\n\nno findings\n\nfailures (1):\n- no scanner ran\n\n" +
-		"summary: incomplete, 0 findings (critical 0, high 0, medium 0, low 0, info 0)\n"
-	if got := run([]string{"scan", path}, strings.NewReader("")); got != (result{1, wantText, ""}) {
+func TestScanRealDefaultRegistryIsComplete(t *testing.T) {
+	path := writeTemp(t, "abc")
+	got := run([]string{"scan", path}, strings.NewReader(""))
+	for _, want := range []string{"status: complete", "- hash.sha256: SHA-256 of file content",
+		`sha256="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"`, "size=3"} {
+		if !strings.Contains(got.stdout, want) {
+			t.Errorf("stdout lacks %q: %q", want, got.stdout)
+		}
+	}
+	if got.code != 0 || got.stderr != "" {
 		t.Errorf("text: got %+v", got)
 	}
-	got := run([]string{"scan", "-json", path}, strings.NewReader(""))
+
+	got = run([]string{"scan", "-json", path}, strings.NewReader(""))
 	var doc struct {
 		SchemaVersion int    `json:"schema_version"`
 		Status        string `json:"status"`
@@ -128,8 +134,24 @@ func TestScanRealDefaultRegistryIsIncomplete(t *testing.T) {
 	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
 		t.Fatalf("stdout is not JSON: %v (%q)", err, got.stdout)
 	}
-	if got.code != 1 || got.stderr != "" || doc.SchemaVersion != 1 || doc.Status != "incomplete" {
+	if got.code != 0 || got.stderr != "" || doc.SchemaVersion != 1 || doc.Status != "complete" ||
+		!strings.Contains(got.stdout, `"id":"hash.sha256"`) {
 		t.Errorf("json: got %+v, doc %+v", got, doc)
+	}
+}
+
+// TestScanSecretShapedPathIsIncomplete: the registry drops a finding whose
+// File looks like a secret, so the scan fails closed.
+func TestScanSecretShapedPathIsIncomplete(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gh"+"p_"+strings.Repeat("A", 36)) // built at runtime
+	if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := run([]string{"scan", path}, strings.NewReader(""))
+	token := filepath.Base(path)
+	if got.code != exitIncomplete || got.stderr != "" || !strings.Contains(got.stdout, "- hash: invalid finding") ||
+		strings.Contains(got.stdout, "hash.sha256") || strings.Contains(got.stdout+got.stderr, token) {
+		t.Errorf("got %+v", got)
 	}
 }
 

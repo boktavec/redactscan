@@ -15,6 +15,7 @@ import (
 	"github.com/boktavec/redactscan/internal/report"
 	"github.com/boktavec/redactscan/internal/safefs"
 	"github.com/boktavec/redactscan/internal/scanner"
+	"github.com/boktavec/redactscan/internal/scanner/builtin"
 )
 
 const exitIncomplete = 1 // the scan did not complete cleanly
@@ -23,7 +24,7 @@ const scanArtifactID = "file-1"
 
 // defaultRegistry is a seam: tests replace it to inject scanners. Production
 // never changes it.
-var defaultRegistry = scanner.Default
+var defaultRegistry = builtin.Default
 
 // afterRun is a seam: tests replace it to modify the file between Run and the
 // change checks. Production never changes it.
