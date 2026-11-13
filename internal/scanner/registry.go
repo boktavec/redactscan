@@ -69,9 +69,3 @@ func validName(name string) bool {
 	}
 	return true
 }
-
-// Default returns the production registry. It is empty until scanners are
-// added (REDACT-37), so every Run on it is incomplete.
-func Default() (*Registry, error) {
-	return NewRegistry()
-}
