@@ -249,7 +249,14 @@ func adversarialInputs() map[string][]byte {
 	}
 }
 
-const adversarialBudget = 5 * time.Second
+// adversarialBudget guards against super-linear blowup, not against slowness.
+// Redact is linear on these inputs, at about 0.5 s per MiB on darwin/arm64
+// (Go 1.27.2): the cost is Go's regexp NFA engine running three passes (detect,
+// the PEM scan and the independent verify), measured at 1, 2, 4, 8 and 10 MiB
+// as roughly 0.5, 1.0, 2.0, 4.1 and 5.0-5.5 s for the slowest inputs. A 5 s
+// budget therefore sat on the measurement itself. 15 s is about 3x the worst
+// measured run, while a quadratic blowup (about 50 s or more at 10 MiB) still fails.
+const adversarialBudget = 15 * time.Second
 
 func TestAdversarialInputsFinishWithinBudget(t *testing.T) {
 	if testing.Short() || raceEnabled {
