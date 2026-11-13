@@ -15,7 +15,7 @@ Refs: `docs/architecture.md` sections 2 (explainable findings, fail closed) and 
 
 **Purpose.** `redactscan scan FILE` prints one report on stdout: readable text by default, or a versioned JSON document with `-json`. Both say whether the scan was complete, list findings with evidence and reasoning, list failures, and give counts by severity. Every untrusted string is neutralised so it cannot drive a terminal or hide content with bidi, zero-width or other invisible characters.
 
-The story text says terminal escape sequences are "stripped". In this spec, **"stripped" means "neutralised by visible escaping"** (user decision): dangerous runes are replaced by a visible escape such as `\x1b` or `‮`, never deleted, so tampering stays visible and the evidence keeps its meaning.
+The story text says terminal escape sequences are "stripped". In this spec, **"stripped" means "neutralised by visible escaping"** (user decision): dangerous runes are replaced by a visible escape such as `\x1b` or `\u202e`, never deleted, so tampering stays visible and the evidence keeps its meaning.
 
 **Concrete example.** A registry with scanner `script` (one finding whose evidence holds an ANSI colour sequence) and scanner `filetype` (panics):
 
@@ -93,7 +93,7 @@ $ redactscan scan -json ./install.sh
   - **Verified** on go1.27.1; see D3.
   - Emoji presentation selectors (U+FE0F) are therefore shown as escapes (accepted, ADR 0005).
 - **FR6. Text escaping.**
-  - Every dangerous rune is written as its `strconv.QuoteRune` escape without the quotes (`\n`, `\t`, `\x1b`, `\x7f`, `\u009b`, `‮`, `️`, `\U000e0100`).
+  - Every dangerous rune is written as its `strconv.QuoteRuneToASCII` escape without the quotes (`\n`, `\t`, `\x1b`, `\x7f`, `\u009b`, `\u202e`, `\ufe0f`, `\U000e0100`).
   - Every invalid UTF-8 byte is written as `\xNN`, and a backslash as `\\`. All other runes are copied, including a literal U+FFFD, so an invalid byte (`\xff`) and a real U+FFFD stay distinguishable (R1).
   - No quotes are added, except for metadata string values (FR10).
   - Text output contains no dangerous rune except the `\n` line terminators the renderer writes.
@@ -235,7 +235,7 @@ Why the JSON post-processing is safe: compact `encoding/json` output only contai
   - new grammar rules on ID, Category and Metadata keys (stricter finding contract)
 - **New external contract:** the JSON report, `schema_version` 1 (FR12-FR14).
 - **Breaking CLI change:** `scan` stdout format changes, and the failure and summary lines move from stderr to stdout. This is acceptable because REDACT-36 marked the format provisional (REDACT-36 spec D11). There is no data migration.
-- **Test fixtures that change in PR 1:** `internal/cli/scan_test.go` uses a hostile finding ID (`"id\x1b[31m\r‮x"`, around line 170), which FR2 now rejects. PR 1 changes that test to assert the finding is dropped as `invalid finding`. Hostile-character coverage for printed fields moves to the report tests (PR 2) and the File seam test (PR 3).
+- **Test fixtures that change in PR 1:** `internal/cli/scan_test.go` uses a hostile finding ID (`"id\x1b[31m\r\u202ex"`, around line 170), which FR2 now rejects. PR 1 changes that test to assert the finding is dropped as `invalid finding`. Hostile-character coverage for printed fields moves to the report tests (PR 2) and the File seam test (PR 3).
 
 ## 5. Engineering decisions and rationale
 
@@ -259,13 +259,13 @@ ADR 0005 records D2-D7 because the JSON schema, the escaping rule and the strict
 | Risk / failure | Handling |
 |---|---|
 | Stdout write fails or is short | One `Write` and `ErrWrite`. The CLI prints the fixed line and exits 3. A partial report is possible only if the writer writes part of the output before failing; the exit code says it failed. |
-| Marshal or escape error | `ErrRender`: nothing is written, a fixed line is printed, exit 3 (FR15, FR18). |
+| Marshal or escape error, or a Metadata value that is not a string, bool, int, int64 or finite float64 (NaN, Inf, nil, named types, slices, maps) | `ErrRender` from both renderers via one shared check: nothing is written, a fixed line is printed, exit 3 (FR15, FR18). |
 | Scanner puts a secret, a blob or prose in Description, Category, Metadata or ID | Dropped by FR1-FR4, and the scan is incomplete. |
 | A legitimate description looks like a covered secret format or label | Dropped (fail closed), as Title already is. Detectors use constant text. |
 | The redactor covers only four secret formats (AWS access key, AWS secret key, GitHub token, PEM private key) | Description (up to 1 KiB) can carry an uncovered secret if a scanner breaks the constant-text contract. Accepted. The threat model records it, and REDACT-37 scanners must include a test that Description and Category are constant (R7). |
 | Invalid UTF-8 in `File` (allowed today: only the length and redactor check apply) | Text shows the exact bytes as `\xNN`. JSON shows U+FFFD (lossy; documented in the package doc and usage). `file` is display-only per the threat model. |
 | A Unicode update changes `strconv.IsPrint` or the property tables | The golden tests and the exhaustive rune test catch it on a toolchain bump. |
-| Emoji with U+FE0F appear as `️` | Accepted. Readability costs less than missing an invisible selector. |
+| Emoji with U+FE0F appear as `\ufe0f` | Accepted. Readability costs less than missing an invisible selector. |
 | A consumer relies on the old `scan` output or stderr lines | The breaking change is documented in the usage text, the README and the PR. |
 | A consumer treats empty or truncated JSON as "no findings" | The usage text and package doc say: check the exit code first; empty or unparseable output is a failure (R4). |
 | **F1 (follow-up, accepted risk):** 8-bit C1 controls on terminals not in UTF-8 mode | Output is UTF-8, so the byte 0x9B can appear as a continuation byte of a printable character (for example U+00DB is `C3 9B`), and a terminal in 8-bit mode may read it as CSI. Escaping operates on runes, not bytes, so this is not prevented. Accepted and recorded in the threat model. |
