@@ -20,6 +20,10 @@
 //   - check ctx in long loops;
 //   - never execute, load or open anything named by the content.
 //
+// Registry.Run drops a finding that breaks the field contract in check.go
+// (identifier grammars for ID, Category and Metadata keys, size limits, UTF-8,
+// and redactor checks on every text field) and records an invalid finding.
+//
 // Run's isolation (recovered panics, Goexit, discarded errors) does not cover
 // goroutines a scanner starts: a panic there crashes the process.
 package scanner
@@ -38,6 +42,9 @@ const (
 	MaxIDBytes     = 128
 	MaxTitleBytes  = 128
 	MaxFileBytes   = 4096
+
+	MaxCategoryBytes    = 64
+	MaxDescriptionBytes = 1024
 )
 
 // Scanner inspects one artifact. See the package doc for the contract.

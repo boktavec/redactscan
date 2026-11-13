@@ -1,0 +1,184 @@
+---
+title: "Scan reports: readable text and versioned JSON, with every untrusted string neutralised"
+---
+
+## Outcome
+
+`redactscan scan FILE` prints one report on stdout: readable text by default, or a versioned JSON document with `-json`. Both say whether the scan was complete, group findings by severity with evidence and reasoning, list failures, and count findings by severity. Every string derived from scanned content is neutralised by visible escaping, so it cannot drive a terminal or hide text with bidi, zero-width or other invisible characters. Story: [REDACT-38](http://localhost:8080/issue/REDACT-38). Full spec: `docs/features/scan-reports/spec.md`. Decision record: `docs/adr/0005-report-escaping-and-versioned-json.md`. The design includes every item from the security design review.
+
+Concrete example: a scan where scanner `script` reports a curl-pipe-to-shell line whose evidence carries an ANSI colour sequence, and scanner `filetype` panics.
+
+<Code
+  id="text-example"
+  filename="redactscan scan ./install.sh (exit 1, stderr empty)"
+  language="text"
+  code={"redactscan scan report\nstatus: incomplete\n\n== high (1) ==\n- script-curl-pipe-sh: Remote script piped to shell\n  file: ./install.sh:12\n  category: execution\n  reasoning: Downloads a script and runs it without verification.\n  evidence: curl -s https://[HOST_1]/i.sh | sh \\x1b[31m\n  metadata: interpreter=\"sh\", line_count=40\n\nfailures (1):\n- filetype: panic\n\nsummary: incomplete, 1 finding (critical 0, high 1, medium 0, low 0, info 0)\n"}
+/>
+
+<Json
+  id="json-example"
+  title="redactscan scan -json ./install.sh (schema_version 1, shown pretty-printed; real output is one compact line)"
+  json={'{\n  "schema_version": 1,\n  "status": "incomplete",\n  "summary": {"total": 1, "by_severity": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0}},\n  "findings": [\n    {"id": "script-curl-pipe-sh", "severity": "high", "category": "execution", "title": "Remote script piped to shell", "description": "Downloads a script and runs it without verification.", "file": "./install.sh", "line": 12, "evidence": "curl -s https://[HOST_1]/i.sh | sh \\u001b[31m", "metadata": {"interpreter": "sh", "line_count": 40}}\n  ],\n  "failures": [{"scanner": "filetype", "reason": "panic"}]\n}'}
+  collapsedDepth={2}
+/>
+
+<Callout id="scope-callout" tone="info">
+
+**In scope:** stricter finding checks in `internal/scanner`, a new `internal/report` package (text and JSON renderers, one escaping rule, golden tests), and `scan` wiring with a `-json` flag. **Non-goals:** real scanners (REDACT-37), `scan ./dir` and multi-artifact reports, a findings exit code or policy (REDACT-50), colours, `-format`, SARIF, pretty JSON, changes to `redact`.
+
+</Callout>
+
+<Callout id="stripped-callout" tone="decision">
+
+The story says escape sequences are "stripped". Here **"stripped" means "neutralised by visible escaping"**: a dangerous rune becomes `\x1b`, `\u202e`, `\ufe0f` and so on, never deleted, so tampering stays visible and evidence keeps its meaning.
+
+</Callout>
+
+## Delivery: three stacked PRs
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size", "Depends on"]}
+  rows={[
+    ["PR 1", "scanner: cheap checks first, then redactor; grammars for ID, Category, Metadata keys; Category 64 B, Description 1 KiB; strict redactor check (no labels) on Category and Description; redactor check on Metadata strings; update the hostile-ID CLI test; threat-model bullets and F1", "about 150 lines", "-"],
+    ["PR 2", "internal/report: isDangerous (IsPrint + default-ignorable + variation selectors), text and JSON escaping (whole output, fail closed on invalid UTF-8), Text and JSON renderers, ErrWrite / ErrRender, golden fixtures (-update), hostile and exhaustive rune tests, status rule test, import allowlist without fmt; ADR 0005", "about 400 lines", "PR 1"],
+    ["PR 3", "cli: scan -json, renderer seams, every renderer error is exit 3 with a fixed line, remove writeFindings and printFailures, usage incl. consumer rule; hostile-filename test through the defaultRegistry seam; threat model (F2), architecture, README", "about 200 lines", "PR 2"]
+  ]}
+/>
+
+## How output flows
+
+<Diagram id="flow-diagram" frame="show" caption="Every finding passes the registry checks before any renderer sees it; both renderers share one definition of a dangerous rune, write once, and every error is a non-zero exit.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Scan (unchanged)</div>
+    <div class="diagram-node">safefs.OpenRegular + readArtifact</div>
+    <div class="diagram-node">Registry.Run</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">PR 1: checkFinding</div>
+    <div class="diagram-node">cheap first: lengths, UTF-8, grammars (ID, Category, Metadata keys)</div>
+    <div class="diagram-node">then redactor: strict on Category and Description; clean on ID, Title, File, Evidence, Metadata strings</div>
+    <div class="diagram-node">fail: drop as invalid finding, scan incomplete</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">PR 2: internal/report</div>
+    <div class="diagram-node">isDangerous = !IsPrint or default-ignorable or variation selector</div>
+    <div class="diagram-node">Text: \x1b \u202e \ufe0f \\ ; metadata k="v"</div>
+    <div class="diagram-node">JSON: encoding/json, then \uXXXX over whole output; invalid UTF-8 fails closed</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">PR 3: scan</div>
+    <div class="diagram-node">text (default) or -json to stdout, one Write</div>
+    <div class="diagram-node">ErrWrite or ErrRender: fixed stderr line, exit 3</div>
+    <div class="diagram-node">exit 0 complete, 1 incomplete, 2 usage, 3 I/O</div>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; }
+```
+
+</Diagram>
+
+## Decisions
+
+<Table
+  id="decision-table"
+  columns={["Decision", "Why", "Rejected"]}
+  rows={[
+    ["Visible escaping; no quotes except metadata string values; backslash and (in values) quote escaped", "Keeps tampering visible and evidence intact; an attacker cannot forge a fake escape or field boundary", "Deleting runes (hides tampering); quoting every field (noisy)"],
+    ["Dangerous = !strconv.IsPrint(r) or Other_Default_Ignorable_Code_Point or Variation_Selector", "IsPrint covers C0, DEL, C1, bidi, zero-width, separators but accepts U+034F, U+3164, U+17B4, U+FE0F, U+E0100 (Verified on go1.27.1). Emoji U+FE0F shows as an escape (accepted)", "IsPrint alone; hand-written range list"],
+    ["JSON escapes the same runes as \\uXXXX over the whole output, fail closed on invalid UTF-8", "encoding/json writes DEL, C1, bidi, zero-width raw (Verified on go1.27.1); escapes keep decoding exact", "Plain JSON (scan -json | cat injection); pre-escaped text (lossy)"],
+    ["Self-describing document; status only from Result.Incomplete()", "A stdout-only consumer cannot mistake an incomplete scan for a clean one; consumers must also check the exit code and treat empty or unparseable output as failure", "Findings-only JSON with stderr failures (fail open)"],
+    ["Integer schema_version 1, bumped only on breaking change", "Simple check for consumers; additive fields need no bump", "Semver or URI version"],
+    ["Registry checks: grammars, bounds, redactor (strict for Category and Description), cheap checks first", "The report is the first output to print these fields; enforce the contract where every finding passes. Sizes Assumed", "Report-only placeholder; contract only"],
+    ["Every renderer error is exit 3 with a fixed stderr line", "No renderer failure can end in exit 0 or 1", "Ignoring marshal errors"],
+    ["Renderer input is scanner.Result; compact JSON; no fmt in report", "No speculative aggregate type; matches redact -json; no reflection formatting of untrusted values", "New report.Report type; indented JSON"]
+  ]}
+/>
+
+## Report contract
+
+<Table
+  id="json-fields"
+  columns={["JSON field", "Type", "Rule"]}
+  rows={[
+    ["schema_version", "integer", "1; first key; changes only on breaking change"],
+    ["status", "string", "complete | incomplete, from Result.Incomplete() only"],
+    ["summary.total, summary.by_severity", "integer, object", "all five severity names always present"],
+    ["findings[]", "array, never null", "id, severity, category, title, description, file, line (0 = unknown), evidence, metadata ({} when empty); ArtifactID not emitted; registry order"],
+    ["failures[]", "array, never null", "scanner, reason (constant scanner.Reason)"]
+  ]}
+/>
+
+<Table
+  id="grammar-table"
+  columns={["Finding field", "Rule enforced in checkFinding"]}
+  rows={[
+    ["ID", "^[a-z0-9][a-z0-9._-]*$, 1..128 bytes; redactor clean"],
+    ["Category", "empty or ^[a-z0-9][a-z0-9._-]*$, up to 64 bytes; redactor strict (no labels)"],
+    ["Description", "valid UTF-8, up to 1024 bytes; redactor strict (no labels)"],
+    ["Metadata keys", "^[a-z][a-z0-9_]{0,63}$ (all current ingest keys fit)"],
+    ["Metadata string values", "existing bounds; redactor clean"],
+    ["Title, File, Evidence", "unchanged bounds; redactor clean"]
+  ]}
+/>
+
+Text layout: header, `status:` line, severity groups from critical to info (empty groups omitted, `no findings` when none), each finding as `- ID: Title` with indented `file`, `category`, `reasoning`, `evidence`, `metadata` lines (empty ones omitted, metadata keys sorted, string values quoted), an optional `failures (n):` section with fixed registry texts, and a final `summary:` line.
+
+<FileTree
+  id="files"
+  title="Files touched"
+  entries={[
+    { path: "internal/scanner/scanner.go", change: "modified", note: "MaxCategoryBytes, MaxDescriptionBytes" },
+    { path: "internal/scanner/check.go", change: "modified", note: "check order, grammars, redactorStrict, Metadata string checks" },
+    { path: "internal/scanner/check_test.go", change: "modified", note: "table tests for grammars, limits, redactor rules, short-circuit" },
+    { path: "internal/report/report.go", change: "added", note: "package doc (consumer rule, schema rule), ErrWrite, ErrRender, SchemaVersion, status, single write" },
+    { path: "internal/report/escape.go", change: "added", note: "isDangerous, appendText, appendQuotedText, escapeJSON" },
+    { path: "internal/report/text.go", change: "added", note: "Text renderer" },
+    { path: "internal/report/json.go", change: "added", note: "JSON document structs and renderer" },
+    { path: "internal/report/imports_test.go", change: "added", note: "allowlist, no fmt" },
+    { path: "internal/report/testdata/", change: "added", note: "empty-complete, no-scanner-incomplete, mixed-severities, hostile goldens (.txt and .json)" },
+    { path: "internal/cli/scan.go", change: "modified", note: "-json, renderer seams, exit 3 mapping, writeFindings/printFailures removed, usage" },
+    { path: "internal/cli/scan_test.go", change: "modified", note: "hostile-ID test now expects a drop (PR 1); report, error-mapping and hostile-filename seam tests (PR 3)" },
+    { path: "docs/adr/0005-report-escaping-and-versioned-json.md", change: "added", note: "escaping, finding contract, schema contract" },
+    { path: "docs/threat-model.md", change: "modified", note: "Scanner section: printed fields, redactor coverage, grammars, F1, F2, consumer rule" }
+  ]}
+/>
+
+## Risks and follow-ups
+
+<Table
+  id="risk-table"
+  columns={["Risk", "Handling"]}
+  rows={[
+    ["Breaking scan output change (failures and summary move to stdout)", "REDACT-36 format was provisional; documented in usage, README and PR"],
+    ["Description up to 1 KiB, redactor knows only four formats", "Accepted; threat model records it; REDACT-37 scanners must test that Description and Category are constant"],
+    ["Invalid UTF-8 in File becomes U+FFFD in JSON", "Documented; text shows exact \\xNN; file is display only per threat model"],
+    ["Legitimate description resembling a secret format or label is dropped", "Fail closed, same as Title today; detectors use constant text"],
+    ["Escaping blow-up: text up to 4x, JSON up to 6x, peak about 200 MiB at 1000 maximal hostile findings", "Accepted for a local CLI; escapeJSON pre-sizes its buffer"],
+    ["Toolchain Unicode update changes the tables", "Golden and exhaustive rune tests catch it"],
+    ["F1: 8-bit C1 (0x9B inside printable UTF-8) on non-UTF-8 terminals", "Accepted risk, recorded in threat model"],
+    ["F2: scan ./dir wiring", "Must set status incomplete when ingest.Walk returns ErrIncomplete; recorded for the directory story"]
+  ]}
+/>
+
+## Verification
+
+<Checklist
+  id="dod"
+  items={[
+    { id: "golden", label: "Golden tests for text and JSON pass byte for byte (regenerated only with -update)" },
+    { id: "hostile", label: "Hostile-rune tests incl. U+034F, U+FE0F, U+E0100, U+3164, U+17B4: no dangerous rune in either output, exact visible escapes, JSON round-trip exact, invalid byte vs literal U+FFFD distinct" },
+    { id: "schema", label: "schema_version == 1 asserted as the first JSON key; no null arrays or objects; status incomplete iff failures non-empty" },
+    { id: "checks", label: "checkFinding table tests: grammars, limits, strict and clean redactor rules, cheap checks short-circuit" },
+    { id: "cli", label: "CLI tests: text default, -json, stderr empty on success, exit codes unchanged, injected failing renderer gives exit 3 for ErrWrite and ErrRender, hostile filename via defaultRegistry seam" },
+    { id: "verify", label: "task verify green on each PR; security-reviewer PASS on PRs 1-3" },
+    { id: "manual", label: "Manual: scan and scan -json on an ordinary temp file show status incomplete, failure no scanner ran, schema_version 1, exit 1, empty stderr; a missing ESC/U+202E path shows an escaped open error" }
+  ]}
+/>

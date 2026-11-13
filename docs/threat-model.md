@@ -216,6 +216,7 @@ Scanned content is untrusted, and so is scanner output, because it is derived fr
 - **Fail closed.** An error, panic (including `panic(nil)`) or `runtime.Goexit` in a scanner, an invalid finding, cancellation, the 1000-findings cap, an invalid artifact, an empty or all-unsupported registry: each is a recorded `Failure` and exit 1. Each `Supports` and `Scan` call runs on its own goroutine that `Run` waits for.
 - **No content in messages.** Error and panic values are never stored or printed. Failure lines use validated scanner names and constant reasons.
 - **Output minimisation.** Only severity, ID, File, Line and Title are printed. ID, File and Title are `strconv.Quote`d, so control and bidi characters appear escaped. ID, Title, File and Evidence must pass a `redactor` check (anything but label-like text drops the finding), and ID and Title are bounded to 128 bytes of UTF-8, File to 4096 bytes.
+- **Finding field contract.** Cheap checks run before any redactor call. ID and Category (which may be empty) must match `^[a-z0-9][a-z0-9._-]*$` (ID at most 128 bytes, Category at most 64), Metadata keys must match `^[a-z][a-z0-9_]{0,63}$`, and Description is valid UTF-8 of at most 1024 bytes. Then the redactor checks each field in turn: ID, Title, File, Evidence and string Metadata values may contain only label-like text, while Category, Description and Metadata keys (a lowercase key such as `ghp_` plus 36 letters passes the grammar) must contain nothing it detects, labels included. The 64 and 1024 byte limits are assumed sizes. Scanners must use constant text for Description and Category (REDACT-37 scanner tests must assert this).
 - **Registry.** Names are validated, unique and captured once; `registry` is reserved for failures not tied to a scanner.
 - **Scanner contract.** Scanners must not modify `content` or `a.Metadata`, spawn goroutines that outlive `Scan`, exit the process, or put scanned content in errors or panics. `scannertest.AssertNoMutation` checks mutation in each scanner's tests.
 
@@ -231,7 +232,9 @@ Scanned content is untrusted, and so is scanner output, because it is derived fr
 - A panic in a goroutine a scanner started itself is not recovered; the process crashes with Go's exit status 2, the same as a usage error.
 - The redactor check covers only the redactor's covered formats.
 - A file modified in place during the read can yield mixed content.
-- Invalid-finding floods are not capped: only accepted findings count toward `MaxFindings`, so a scanner returning many invalid findings costs about 1.7 s per million secret-shaped ones (measured). Deferred to REDACT-37 or REDACT-39.
+- Invalid-finding floods are not capped: only accepted findings count toward `MaxFindings`, so a scanner returning many invalid findings costs about 1.7 s per million secret-shaped ones (measured on the old field set: ID, Title, File and Evidence). The worst case now grows with Description size (up to 1 KiB) and the Metadata key and value checks, and has not been re-measured. Deferred to REDACT-37 or REDACT-39.
+- The redactor recognises only four formats, so an uncovered secret in Description (up to 1 KiB) passes if a scanner breaks the constant-text contract.
+- F1 (8-bit C1 controls on terminals not in UTF-8 mode): output escaping works on runes, so the byte 0x9B inside a printable character is not prevented. Relevant once the report prints these fields (REDACT-38, later PRs).
 - A legitimate finding whose ID, Title, File or Evidence resembles a covered secret format is dropped as `invalid finding` (fail closed).
 
 ## Live log sources (`internal/logs`)
