@@ -45,6 +45,7 @@ func fixtures() map[string]scanner.Result {
 			},
 			Failures: []scanner.Failure{
 				{Scanner: scanner.RegistryName, Reason: scanner.ReasonTooLarge},
+				{Scanner: scanner.RegistryName, Reason: scanner.ReasonChanged},
 				{Scanner: "filetype", Reason: scanner.ReasonPanic}},
 			Ran: 2,
 		},
