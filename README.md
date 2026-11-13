@@ -5,7 +5,7 @@ Security-focused CLI for scanning untrusted files and repositories and redacting
 
 ```
 redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]
-redactscan scan FILE
+redactscan scan [-json] FILE
 ```
 
 Reads FILE (or stdin when FILE is `-` or absent), replaces covered secret formats (AWS access and secret keys, GitHub tokens, PEM private keys) with numbered labels such as `[GITHUB_TOKEN_1]`, and writes the result. With FILE the result goes to a new file next to it, named by adding `_cleaned` before the last extension (`logs/app.log` becomes `logs/app_cleaned.log`, `.env` becomes `.env_cleaned`), with mode 0600; stdin always goes to stdout. Other secret formats pass through unchanged, so review the output before sharing it. Input is limited to 10 MiB.
@@ -36,4 +36,4 @@ FILE must be a regular file reached without symlinks: a symlink in any part of t
 
 ### scan
 
-`redactscan scan FILE` reads FILE (never executes it) and runs every registered scanner over it. Stdout gets one line per finding, `SEVERITY "ID" "FILE"[:LINE] "TITLE"`; failure lines and a summary go to stderr. Files over 10 MiB are not scanned. A scan is incomplete, and exits 1, if a scanner fails or no scanner ran. No scanners are registered yet, so every scan currently reports `scan incomplete: no scanner ran`. The output format and exit codes (0 complete, 1 incomplete, 2 usage error, 3 I/O error) are provisional. A complete scan with no findings only means the registered scanners found nothing.
+`redactscan scan [-json] FILE` reads FILE (never executes it) and runs every registered scanner over it. Stdout gets one report: text by default, or with `-json` one JSON object with `schema_version` 1, `status`, `summary`, `findings` and `failures`. Untrusted strings are escaped, so no control or bidi character reaches the terminal; in JSON an invalid UTF-8 byte in a file name shows as U+FFFD. stderr is empty on success. Flags must come before FILE. Files over 10 MiB are not scanned. A scan is incomplete, and exits 1, if a scanner fails or no scanner ran; exit codes are 0 complete, 1 incomplete, 2 usage error, 3 I/O or report error. Always check the exit code, and treat empty or unparseable output as a failed scan. No scanners are registered yet, so every scan currently reports `status: incomplete` with `no scanner ran`. **Breaking change:** the stdout format changed, and failures and the summary moved from stderr to stdout. A complete scan with no findings only means the registered scanners found nothing.

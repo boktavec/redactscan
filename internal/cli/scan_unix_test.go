@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/boktavec/redactscan/internal/finding"
 )
 
 func TestScanRefusesUnsafeFiles(t *testing.T) {
@@ -50,5 +52,29 @@ func TestScanRefusesUnsafeFiles(t *testing.T) {
 				t.Fatal("scan blocked")
 			}
 		})
+	}
+}
+
+func TestScanHostileFileNameIsEscaped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a\x1b[31m\u202eb.log")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Skipf("file system rejects the name: %v", err)
+	}
+	useScanners(t, fakeScanner{name: "a", fileIsPath: true,
+		findings: []finding.Finding{finding1("f", finding.SeverityLow, "", 1, "T")}})
+	// The temp dir itself is plain ASCII, so only the base name is hostile.
+	for _, tt := range []struct{ flag, want string }{
+		{"", `a\x1b[31m\u202eb.log:1`},
+		{"-json", `a\u001b[31m\u202eb.log`},
+	} {
+		args := []string{"scan", path}
+		if tt.flag != "" {
+			args = []string{"scan", tt.flag, path}
+		}
+		got := run(args, strings.NewReader(""))
+		if got.code != 0 || got.stderr != "" || !strings.Contains(got.stdout, tt.want) {
+			t.Errorf("%q: want %q in %+v", tt.flag, tt.want, got)
+		}
+		assertNoDangerousRune(t, got.stdout)
 	}
 }
