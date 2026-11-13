@@ -236,3 +236,96 @@ Scanned content is untrusted, and so is scanner output, because it is derived fr
 - The redactor recognises only four formats, so an uncovered secret in Description (up to 1 KiB) passes if a scanner breaks the constant-text contract.
 - F1 (8-bit C1 controls on terminals not in UTF-8 mode): output escaping works on runes, so the byte 0x9B inside a printable character is not prevented. Relevant once the report prints these fields (REDACT-38, later PRs).
 - A legitimate finding whose ID, Title, File or Evidence resembles a covered secret format is dropped as `invalid finding` (fail closed).
+
+## Live log sources (`internal/logs`)
+
+`logs.FileSource` follows one log file like `tail -F` and delivers complete lines to a later redaction pipeline. See `docs/features/file-log-source/spec.md` and ADR 0005. The package is not wired to the CLI yet.
+
+### Trust boundary
+
+The adapter is where untrusted file state (path, content, line lengths) enters a long-running stream. `LogEntry.Line` holds raw, unredacted data.
+
+### Controls
+
+- **Safe open.** The file is opened through `safefs.OpenRegular`: no symlink in any typed component, regular files only, no blocking on a FIFO. A refusal is returned from `Read` before any channel exists.
+- **Complete lines only.** A line is emitted only when its `\n` has been read and it is within `MaxLineBytes` (default 64 KiB, at most 1 MiB). A line over the cap, a pending line cut off by truncation or rotation, and the fragment of a line already in progress when reading starts each become one marker with no content, so a secret is never split across what the redactor sees.
+- **Bounded memory.** Per `Read`: at most `MaxLineBytes` for the pending line plus a fixed 32 KiB buffer. Lines are found by scanning the fixed buffer; no `bufio.Scanner`, `ReadBytes` or `io.ReadAll`. The channel is unbuffered, so a slow consumer slows reading.
+- **Safe reopen on rotation.** Each tick compares `Lstat(path)` with `Fstat` of the held descriptor (never with an earlier `Lstat`) using `os.SameFile`. On a mismatch the old file is read only up to its size at detection, the descriptor is closed, and the path is reopened through `safefs.OpenRegular` (symlink, FIFO, directory and device are refused). The new file must have the same owner uid as the first file and exactly one hard link, or the stream ends with `ErrReopenRefused`. This closes the planted-hard-link and foreign-file gaps at the one point an attacker controls.
+- **Fixed error text.** No error contains the path, the label, line content or OS error text. OS errors unwrap to a bare `syscall.Errno`. The label is validated (bounded UTF-8, no control, format or line and paragraph separator characters) and `Name()` never returns the path.
+- **Fail closed.** Every reopen refusal, an `Lstat` error other than not-found, and a `Fstat` or read error on the held descriptor end the stream with one final `Err` entry (the descriptor is closed first) and then close the channel. The read-error path cannot be triggered on a local filesystem without fault injection, so it is verified by inspection, as safefs did for `fstat`.
+- **Resources.** One descriptor and one goroutine per `Read`; both are released when the channel closes. Every send also waits on `ctx.Done()`, and the read loop checks `ctx` before each read, so cancellation also stops reading a region that produces no entries.
+- **Never executed.** The package does not import `os/exec` and logs nothing.
+
+### Constraints for callers
+
+- Redact with context across lines (a PEM block or wrapped token spans several entries): the guarantee is "no partial line", not "a secret stays on one line".
+- Never expose `Line` outside the process (MCP, logs) before redaction.
+- Escape CR, NUL, ANSI and bidi characters before display.
+- Bound concurrent `Read` calls in any MCP layer: each costs one descriptor, one goroutine and up to `MaxLineBytes` plus 32 KiB.
+- Always cancel `ctx`. A consumer that stops reading without cancelling pins one goroutine and one descriptor; the adapter cannot detect it.
+- Never use `Dropped` as a size for allocation. It is a lower bound on the discarded bytes.
+
+### Accepted risks
+
+- **Huge newline-free regions.** While `ctx` is live, reading a very large file or sparse region without newlines costs CPU, and the truncation and rotation checks wait until that read finishes. There is no per-tick byte cap.
+- **No hard-link check on the first open.** A hard link created before `Read` is not detected; this matches the safefs accepted risk. macOS has no `protected_hardlinks`, so any user who can write the log directory can plant a link to a file they cannot read. The file is read with the invoking user's permissions, so when the tool runs as root or another privileged user, a link planted before `Read` can pull that file's content into a less-trusted downstream consumer (an MCP server or AI agent). Rotation reopens are protected by the link-count check.
+- **`copytruncate` regrowth.** If the file is truncated and grows past the read offset within one poll interval, the truncation is missed and reading resumes mid-line in the new content. Unlike the start position there is no fragment skip, so a mid-line fragment can be emitted as a line.
+- **`/proc` and `/sys` files** report size 0, so the content is re-emitted every poll. Unsupported input.
+- **Blocking I/O on network filesystems.** A `Fstat` or read that hangs on NFS or FUSE blocks the loop; cancellation takes effect afterwards.
+- **Lost lines around rotation.** Two rotations within one poll interval skip the intermediate file, and bytes a writer appends to the old file after the rotation was detected (past its size at detection) are not read.
+- **Ownership or hard-link changes end the stream.** A rotation that changes the file owner, or a log that legitimately has a second hard link, is refused with `ErrReopenRefused`. This is an operational cost of the checks.
+- **Inode identity on NFS, FUSE and overlayfs.** `os.SameFile` may report a rotation falsely or miss one.
+- **A blocking `Lstat`** on a hung network filesystem blocks the loop until it returns.
+- **A removed path with no new file** keeps the held descriptor being read with no error; after a rotation drain with no new file the source waits, holding no descriptor, until the path reappears.
+- **Cross-line secret splitting** (see the caller constraints).
+
+## Quarantine store (`internal/quarantine`)
+
+The store keeps suspicious content (scan decision `review` or `block`) and its metadata under `~/.redactscan/quarantine`. See `docs/features/quarantine-store/spec.md` and ADR 0006. Nothing calls it yet except tests; the commands that will (REDACT-57 to 60) inherit the constraints below.
+
+### Trust boundary
+
+The store tree under the base directory, owned by the invoking user. Adversaries are hostile scanned content (bytes, file names, URIs and findings derived from it) and other local users. Out of scope: processes running as the same uid (they can already read mode 0700 and 0600), and root.
+
+### Controls
+
+- **Exact modes.** Directories are 0700 and files 0600, set with `fchmod` on descriptors, never by path and never from the umask. Execute, setuid, setgid and sticky bits never reach the store.
+- **Refuse, do not repair, entries.** `Open` repairs only the store's own top-level directories (and reports them). `Read` and `Verify` refuse an entry directory that is a symlink, not a directory, foreign-owned or not exactly 0700 (including setuid, setgid and sticky), and refuse before opening it. A wrong mode on an entry is a tamper signal.
+- **Symlink and swap safety.** Every directory is pinned with `safefs.OpenChildDir` and every file opened with `safefs.OpenRegularIn` (Lstat, non-blocking open, `SameFile`, regular file, euid owner), so a FIFO, symlink (including one into the same entry) or other substitute is refused without blocking.
+- **Strict metadata.** `metadata.json` must be a euid-owned 0600 regular file of at most 4 MiB, decoded with `encoding/json/v2` (duplicate, case-variant and unknown members and trailing data are refused), with `id` equal to the directory name and `sha256` equal to the ID prefix. Failure is `ErrCorruptMetadata` and no partial metadata.
+- **Complete means published.** An entry is complete only once `metadata.json` exists. Content and metadata are placed with a no-replace hard link, so an existing file is never overwritten. `Read` also requires `content` to be a euid-owned 0600 regular file of exactly `metadata.size` bytes.
+- **Verification.** `Verify` re-hashes at most `size+1` bytes of `content` (read from offset 0, independent of the descriptor offset) and compares count and SHA-256. Content that is missing, swapped for a non-regular file or symlink, foreign-owned, unreadable or mode-changed, or whose size, count or hash differs is `ErrVerifyFailed`; only an unexpected OS error keeps its bare Errno. `Read` never re-hashes (O(size) work belongs to release); it reports bad `content` state as `ErrIncomplete`.
+- **IDs are never paths.** `ValidID` (`^[0-9a-f]{64}-[0-9a-f]{16}$`) runs before any filesystem call; Name and URI are display data and never path components.
+- **Bounded and clean input.** Name and URI are bounded and redactor-checked on `Put`, a URI with userinfo, query, fragment or a scheme other than https, http or file is refused, and metadata over 4 MiB is refused before anything is written. The store budget (`MaxEntrySize`, `MaxStoreBytes`, `MaxEntries`) is checked before any write.
+- **No content in messages.** Errors have fixed text and OS errors unwrap to a bare `syscall.Errno`: no path, ID, name, URI, finding text or OS error text. Marker tests cover every `Open`, `Put`, `Read` and `Verify` failure path.
+- **Root refusal.** euid 0 is refused unless `Options.AllowRoot` is set.
+
+### Constraints for callers (REDACT-57, 58, 59, 60)
+
+- **REDACT-58 (release, delete):** never derive a release path from the stored Name or URI; choose the destination independently. Preferred: hash while copying (`io.MultiWriter` or `io.TeeReader` over `io.LimitReader(f, size+1)`) from the opened content descriptor into a no-clobber temporary destination, and publish only when the count equals `metadata.size` and the SHA-256 matches. Alternative: `verifyContent` on the descriptor, then copy with `ReadAt` or an `io.SectionReader` from offset 0, requiring `n == size`. Verification and copy are two separate reads in the alternative, so only hash-while-copying closes the window in which the bytes can change; REDACT-58 must carry a regression test that a release after `Verify` is byte-identical to the verified content. Never repair or delete to make room for a `Put`.
+- **REDACT-57 and CLI output:** escape control and bidi characters in Name, URI and finding strings before printing them.
+- **MCP:** treat Name, URI and findings as untrusted quoted data. Nothing, including `Read`, returns content bytes.
+- **Failures are not clean.** `ErrStoreFull`, `ErrMetadataTooLarge` and every other `Put` failure mean "not quarantined or incomplete", never "clean".
+- **REDACT-59/60 (watcher):** serialize `Put` calls (the budget check is not locked). Findings passed to `Put` must come from `scanner.Registry.Run` (redactor-checked); another producer must apply the same checks.
+- **URI schemes:** the allowlist (https, http, file) will need extending for ssh and scp git sources; that is a deliberate change to the validation rule, not a bypass.
+
+### Accepted risks
+
+Recorded as user-accepted in ADR 0006.
+
+- **Raw content at rest.** Quarantined content is stored unencrypted, appears in backups, and has no retention policy; deleting entries is a later command.
+- **sha256 in every ID.** Anyone who can see an entry name can test guesses of low-entropy content offline. Seeing the names needs our uid, given 0700.
+- **Orphan temp files.** A crash during `Put` can leave `.tmp-*` files holding raw content (0600) or an entry directory without `metadata.json`. They count against the budget; cleanup is deferred (REDACT-58 orphan cleanup, to be filed; no issue exists yet).
+- **Unserialized budget.** Concurrent `Put` calls, in one process or several, can exceed the entry and byte budget.
+- **Same-uid hard links.** An extra hard link to an entry file by the same user is not refused (an `nlink` of 2 can also be legitimate after a failed temp removal).
+- **Spotlight marker.** `.metadata_never_index` is best effort; whether current macOS honours it for a non-volume-root folder is not verified.
+- **macOS ACLs.** Extended and inherited ACLs are not inspected or cleared. A base under a folder with an inheritable allow-read ACE can expose entries despite the 0700 and 0600 checks. Linux POSIX ACLs are neutralised by the mode mask. Enforcement would need cgo or `x/sys` and is deferred.
+
+### Open residual risks (acceptance pending)
+
+Not yet accepted by the user and not recorded in ADR 0006.
+
+- **Budget counts files only (not directory blocks or in-flight temps).** Directory blocks, `.meta-*.tmp` files in incomplete entries and concurrent overshoot are not counted.
+- **Post-link cleanup failure.** If a `Put` fails after `metadata.json` was linked (for example on an fsync) and the best-effort removal of that entry also fails, the call reports an error but a valid entry remains; a retry stores the content again as a second entry.
+- **`file:` URIs** store local paths in plaintext metadata.
+- **Source modified in place.** A same-size in-place modification during the copy is not detected; the stored hash still matches the stored bytes.

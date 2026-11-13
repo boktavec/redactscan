@@ -401,24 +401,31 @@ The watcher should never delete suspicious files automatically.
 
 ## 12. Quarantine
 
-Recommended storage:
+Storage (`internal/quarantine`; design in `docs/features/quarantine-store/spec.md`, decisions in ADR 0006):
 
 ```text
-~/.sentinel/
-  incoming/
-  quarantine/
-  scans/
-  cache/
-  logs/
+~/.redactscan/                  0700
+  .metadata_never_index         0600  macOS only, best effort
+  incoming/                     0700  created only
+  scans/                        0700  created only
+  quarantine/                   0700
+    .tmp-<16 hex>               0600  in-flight content, never an entry
+    <sha256 hex>-<16 hex>/      0700  one directory per quarantine event
+      content                   0600  exact bytes of the source
+      metadata.json             0600  present => entry complete
 ```
+
+Directories are exactly 0700 and files exactly 0600. Symlinks and directories owned by another user are refused, and the store refuses to run as root unless explicitly allowed.
+
+The package provides `Open`, `Put`, `Read` (strict metadata, no content, no repair of entries) and `Verify` (re-hash of content against the metadata). The CLI commands below are not built yet. Controls, caller constraints and accepted risks are in `docs/threat-model.md` (Quarantine store).
 
 CLI:
 
 ```bash
-sentinel quarantine list
-sentinel quarantine inspect <id>
-sentinel quarantine release <id>
-sentinel quarantine delete <id>
+redactscan quarantine list
+redactscan quarantine inspect <id>
+redactscan quarantine release <id>
+redactscan quarantine delete <id>
 ```
 
 Release requires explicit user action for reviewed/blocked artifacts.
@@ -596,6 +603,8 @@ JournaldSource
 ```
 
 Keep logs local and expose only query results to the model.
+
+The first adapter, `FileSource` (`internal/logs`, ADR 0005), fixes the contract the others inherit. `Query{FromStart bool}` always follows the source. A `LogEntry` is one complete line (raw and unredacted, so it must be redacted before it leaves the process), one drop marker for an over-cap or cut-off line, or, as the last entry before the channel closes, a fixed-text `Err`. `Name()` and `LogEntry.Source` are a validated label, never a path. A file is reopened after rotation only through `safefs.OpenRegular`, with the same owner and a single hard link. See `docs/threat-model.md`, "Live log sources".
 
 ---
 

@@ -1,0 +1,234 @@
+---
+title: "Quarantine store: inert, private, content-addressed entries with strictly validated metadata"
+---
+
+## Outcome
+
+`internal/quarantine` keeps suspicious content (decision `review` or `block`) under `~/.redactscan/quarantine/` so that it is never executable, never readable by other local users, never mistaken for a complete entry when half written, and described by metadata that is refused unless it passes strict validation. Story: REDACT-56. Full spec: `docs/features/quarantine-store/spec.md`. ADR: 0005 (written in PR 1).
+
+Concrete example: the watcher (later) or the scan command opens `~/Downloads/tool.zip` with `safefs.OpenRegular`, and the scan says `block`. `store.Put(f, Input{Source: {download, "https://example.com/tool.zip"}, Name: "tool.zip", Decision: Block, Findings: fs})` copies the bytes into `quarantine/3f9a…c1-8d2e4b7a01f3c955/content` (0600, even though the download was 0755), writes `metadata.json` last, and returns the ID. `store.Read(id)` gives back exactly the same record. `store.Read("../../.ssh")` returns `ErrInvalidID` without touching the disk. A `metadata.json` edited to `"decision":"allow"` returns `ErrCorruptMetadata`.
+
+<Callout id="scope-callout" tone="info">
+
+**Non-goals:** CLI commands, listing, release, delete and cleanup (REDACT-57/58); watcher routing and the contents of `incoming/` and `scans/` (REDACT-59/60); a shared `internal/policy.Decision` (REDACT-49); encryption at rest, retention, backup exclusion; cross-process locking of the budget; Windows.
+
+</Callout>
+
+## Delivery: four stacked PRs
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size"]}
+  rows={[
+    ["PR 1", "safefs.OpenRegularIn + ErrNotOwned; quarantine package doc, constants, errors, Decision, Options, ValidID; Open with base validation, root refusal, dir create/check/repair, Repaired(), darwin .metadata_never_index; ADR 0006; architecture section 12", "about 450 lines plus ADR"],
+    ["PR 2", "redactor.IsClean (moved from scanner); metadata v1 DTOs, typed finding metadata, encode, strict encoding/json/v2 decode, shared validateRecord, Put-only input checks; pure tests", "about 450 lines"],
+    ["PR 3", "Put: validation, fstat, pre-marshal size check, budget, hashed copy, ID reserve, no-replace links, publish, cleanup; orphan-temp follow-up issue", "about 480 lines"],
+    ["PR 4", "Read, Verify, verifyContent; swap and marker-name tests over every path; threat-model Quarantine section", "about 400 lines plus docs"]
+  ]}
+/>
+
+The approved design had three PRs; the security-review additions push the Put/Read PR past the 500-line limit, so it is split into PR 3 (write) and PR 4 (read).
+
+## Layout and trust boundary
+
+<Diagram id="layout-diagram" frame="show" caption="Symlinks are allowed only above base. From base down every directory is pinned through a verified descriptor and every file is opened with Lstat + SameFile.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Above base (trusted as the OS reports it)</div>
+    <div class="diagram-node">os.UserHomeDir() or explicit base</div>
+    <div class="diagram-node">base validated before I/O: absolute, cleaned, not /, no NUL, parent exists</div>
+    <div class="diagram-node">os.OpenRoot(parent): may follow symlinks</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Store dirs (repair allowed)</div>
+    <div class="diagram-node">.redactscan/ 0700</div>
+    <div class="diagram-node">incoming/ scans/ quarantine/ 0700</div>
+    <div class="diagram-node">Mkdir, Lstat (no symlink), OpenChildDir, uid == euid</div>
+    <div class="diagram-node">mode != 0700: fchmod 0700 on fd, report in Repaired()</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">Entries (refuse, never repair)</div>
+    <div class="diagram-node">&lt;sha256&gt;-&lt;16 hex&gt;/ exactly 0700</div>
+    <div class="diagram-node">content exactly 0600</div>
+    <div class="diagram-node">metadata.json exactly 0600 (present = complete)</div>
+    <div class="diagram-node">.tmp-* / .meta-*.tmp never match the ID grammar</div>
+  </div>
+  <div class="diagram-box result">
+    <span class="diagram-pill">euid 0 refused unless AllowRoot</span>
+    <span class="diagram-pill">ID regex before any filesystem call</span>
+    <span class="diagram-pill">fixed error text, Errno-only unwrap</span>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.result { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 8px; }
+```
+
+</Diagram>
+
+## Put: nothing is written until every cheap check passed
+
+<Diagram id="put-diagram" frame="show" caption="Steps 1-4 touch no file. A crash after step 5 leaves at most a temp file or an entry without metadata.json, never a valid-looking entry.">
+
+```html
+<div class="grid4">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">1-4. Refuse early</div>
+    <div class="diagram-node">validate input: decision, source type, Name 4096 B, URI 8192 B, no userinfo/query/fragment, redactor.IsClean</div>
+    <div class="diagram-node">findings: max 1000, finding.Validate, per-field caps</div>
+    <div class="diagram-node">fstat: regular, size &lt;= MaxEntrySize</div>
+    <div class="diagram-node">marshal with fixed-width placeholders &lt;= 4 MiB</div>
+    <div class="diagram-node">budget: bytes and entry count</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">5. Copy</div>
+    <div class="diagram-node">.tmp-&lt;rand&gt; O_EXCL, fchmod 0600</div>
+    <div class="diagram-node">LimitReader(size+1) into file + sha256</div>
+    <div class="diagram-node">count != fstat size: ErrSourceChanged</div>
+    <div class="diagram-node">fsync, close</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">6-7. Reserve and place</div>
+    <div class="diagram-node">Mkdir(sha-rand, 0700), EEXIST: new suffix (10 tries)</div>
+    <div class="diagram-node">fchmod 0700, fsync quarantine/</div>
+    <div class="diagram-node">Root.Link(tmp, id/content) no-replace</div>
+    <div class="diagram-node">remove tmp, fsync entry dir</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">8. Publish</div>
+    <div class="diagram-node">.meta-&lt;rand&gt;.tmp 0600, write, fsync</div>
+    <div class="diagram-node">Root.Link(tmp, metadata.json) no-replace</div>
+    <div class="diagram-node">remove tmp, fsync entry dir</div>
+    <div class="diagram-node">return id</div>
+  </div>
+</div>
+```
+
+```css
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+```
+
+</Diagram>
+
+<Callout id="link-decision" tone="decision">
+
+**Content and metadata are placed with `Root.Link`, never `Rename`.** `link` refuses an existing target, so a pre-planted `content` or `metadata.json` is left untouched and the call fails with `ErrEntryExists`. **Verified** with a scratch probe on macOS (go1.27.1) and Linux (`golang:1.27`, go1.27.3): `Root.Link(tmp, "id/content")` works with a two-component in-root target, returns `EEXIST` on an existing name, and returns "path escapes from parent" through an escaping symlink; `Root.Mkdir` on an existing name returns `EEXIST`. The Linux probe ran as root; PR 1 and PR 3 tests pin the same behaviour as a non-root user.
+
+</Callout>
+
+## API
+
+<Code
+  id="api-code"
+  filename="internal/quarantine/quarantine.go"
+  language="go"
+  code={"type Decision string\nconst (\n\tReview Decision = \"review\"\n\tBlock  Decision = \"block\" // allow and unknown values are refused on write and read\n)\n\ntype Options struct {\n\tMaxEntrySize  int64 // 0 => 256 MiB (Assumed placeholder)\n\tMaxStoreBytes int64 // 0 => 4 GiB (Assumed placeholder)\n\tMaxEntries    int   // 0 => 1000 (Assumed placeholder)\n\tAllowRoot     bool  // euid 0 refused unless set\n}\n\ntype Input struct {\n\tSource   artifact.SourceMetadata\n\tName     string // untrusted, display only\n\tDecision Decision\n\tFindings []finding.Finding\n}\n\nfunc Open(base string, opts Options) (*Store, error) // \"\" => UserHomeDir()/.redactscan\nfunc (s *Store) Close() error\nfunc (s *Store) Repaired() []string // \"base\", \"incoming\", \"quarantine\", \"scans\"\nfunc (s *Store) Put(src *os.File, in Input) (id string, err error)\nfunc (s *Store) Read(id string) (Metadata, error)\nfunc (s *Store) Verify(id string) error\nfunc ValidID(id string) bool // ^[0-9a-f]{64}-[0-9a-f]{16}$\n\n// internal/safefs (PR 1)\nfunc OpenRegularIn(root *os.Root, name string) (*os.File, error) // Lstat, O_RDONLY|O_NONBLOCK|O_NOCTTY, SameFile, regular, euid owner\n\n// internal/redactor (PR 2)\nfunc IsClean(s string) bool // moved from scanner.redactorClean"}
+/>
+
+Errors are fixed sentinels with no path, ID, name, URI or OS text: `ErrUnsupportedPlatform`, `ErrInvalidBase`, `ErrInvalidOptions`, `ErrRunningAsRoot`, `ErrUnsafeDir`, `ErrInvalidID`, `ErrNotFound`, `ErrIncomplete`, `ErrCorruptMetadata`, `ErrMetadataTooLarge`, `ErrInvalidInput`, `ErrSensitiveInput`, `ErrTooLarge`, `ErrStoreFull`, `ErrSourceChanged`, `ErrIDExhausted`, `ErrEntryExists`, `ErrVerifyFailed`.
+
+## Metadata v1
+
+<Code
+  id="metadata-code"
+  filename="quarantine/<id>/metadata.json"
+  language="json"
+  code={"{\n  \"schema_version\": 1,\n  \"id\": \"<64 hex>-<16 hex>\",\n  \"sha256\": \"<64 hex>\",\n  \"size\": 1234,\n  \"created_at\": \"2026-10-27T10:00:00Z\",\n  \"source\": {\"type\": \"download\", \"uri\": \"https://example.com/tool.zip\"},\n  \"name\": \"tool.zip\",\n  \"decision\": \"block\",\n  \"findings\": [{\n    \"id\": \"script-curl-pipe-sh\", \"severity\": \"high\", \"category\": \"script\",\n    \"title\": \"...\", \"description\": \"...\", \"artifact_id\": \"a-1\",\n    \"file\": \"install.sh\", \"line\": 12, \"evidence\": \"...\",\n    \"metadata\": [{\"key\": \"count\", \"type\": \"int\", \"value\": 3}]\n  }]\n}"}
+/>
+
+<Callout id="json-decision" tone="decision">
+
+**Strict decoding uses `encoding/json/v2` (standard library).** **Verified** with a scratch probe on macOS and Linux go1.27: v2 with `RejectUnknownMembers(true)` rejects duplicate members, case-variant member names and trailing data; v1 `encoding/json` silently accepts all three (last duplicate wins, case-insensitive match). Severity is stored by name and decoded by exact match, not `ParseSeverity`. Finding metadata is a typed `{key, type, value}` list so `int`, `int64`, `float64`, `bool` and `string` round-trip exactly, including integers above 2^53.
+
+</Callout>
+
+`Read` refuses with `ErrCorruptMetadata` and returns nothing partial unless: the file is regular, euid-owned, exactly 0600 and at most 4 MiB (the same constant Put checks before writing); decoding is strict; `schema_version` is 1; decision is `review` or `block`; every field is within its bound; `id` equals the directory name and `sha256` equals the ID prefix. `content` must also be regular, euid-owned, exactly 0600 and the recorded size, else `ErrIncomplete`. Name and URI are redactor-checked only at Put, so a redactor rule change never makes old entries unreadable.
+
+## Files
+
+<FileTree
+  id="files-tree"
+  entries={[
+    { path: "internal/safefs/openin_unix.go", change: "added", note: "PR 1. OpenRegularIn, ErrNotOwned." },
+    { path: "internal/safefs/openin_other.go", change: "added", note: "PR 1. ErrUnsupportedPlatform stub." },
+    { path: "internal/safefs/openin_test.go", change: "added", note: "PR 1. Symlink, FIFO, directory, swap, foreign owner, invalid names, error text." },
+    { path: "internal/quarantine/quarantine.go", change: "added", note: "PR 1. Package doc, constants, errors, Decision, Options, ValidID." },
+    { path: "internal/quarantine/store_unix.go", change: "added", note: "PR 1. Store, Open, ensureDir, Repaired, Close, seams." },
+    { path: "internal/quarantine/store_other.go", change: "added", note: "PR 1. ErrUnsupportedPlatform." },
+    { path: "internal/quarantine/store_test.go", change: "added", note: "PR 1. FR1-FR8." },
+    { path: "internal/redactor/clean.go", change: "added", note: "PR 2. IsClean, moved from scanner." },
+    { path: "internal/scanner/check.go", change: "modified", note: "PR 2. Uses redactor.IsClean." },
+    { path: "internal/quarantine/metadata.go", change: "added", note: "PR 2. DTOs, encode, strict v2 decode." },
+    { path: "internal/quarantine/validate.go", change: "added", note: "PR 2. validateRecord and Put-only input checks." },
+    { path: "internal/quarantine/metadata_test.go", change: "added", note: "PR 2. Corruption table, round-trip, size cap." },
+    { path: "internal/quarantine/put_unix.go", change: "added", note: "PR 3. Put, budget, copy, reserve, link, publish, cleanup." },
+    { path: "internal/quarantine/put_test.go", change: "added", note: "PR 3. FR12-FR15, crash simulation." },
+    { path: "internal/quarantine/read_unix.go", change: "added", note: "PR 4. Read, Verify, verifyContent." },
+    { path: "internal/quarantine/read_test.go", change: "added", note: "PR 4. FR16-FR21." },
+    { path: "docs/adr/0006-quarantine-store.md", change: "added", note: "PR 1. Format, trust boundary, atomic publish, accepted risks." },
+    { path: "docs/architecture.md", change: "modified", note: "PR 1. Section 12: ~/.redactscan and layout." },
+    { path: "docs/threat-model.md", change: "modified", note: "PR 4. Quarantine section: controls, caller constraints, accepted risks." }
+  ]}
+/>
+
+## Security constraints for later stories
+
+- REDACT-58 never derives a release path from stored Name or URI, and verifies and copies from the same descriptor (`verifyContent`).
+- Name, URI and finding text are untrusted: the CLI escapes them, and MCP marks them as untrusted quoted data. Neither `Read` nor any MCP tool returns content bytes.
+- Every Put failure (`ErrStoreFull`, `ErrMetadataTooLarge`, …) is reported as not quarantined or incomplete, never as clean, and callers never clean the store to make room.
+- Findings passed to Put come from `scanner.Registry.Run`; any other producer must apply the same redactor checks.
+- `quarantine.Decision` moves to, or is mapped from, `internal/policy.Decision` when REDACT-49 lands.
+
+## Accepted risks
+
+<Callout id="risks-callout" tone="risk">
+
+- **Raw content at rest (user-accepted):** unencrypted, included in backups, no retention policy. On darwin `.metadata_never_index` is created best effort; whether current macOS honours it for a non-volume-root folder is **Assumed**, not verified.
+- **sha256 in every ID (user-accepted):** anyone who can list the directory can guess low-entropy content offline. Listing requires our uid because of the 0700 mode.
+- **Orphan `.tmp-*` files (user-accepted):** a crash can leave raw content in a 0600 temp file. Temp files count against the budget; cleanup is a follow-up issue filed with PR 3.
+- **Budget not serialized:** concurrent Puts can overshoot by the number of in-flight entries. The watcher (REDACT-59/60) should serialize.
+- **Same-uid attackers and hard links:** out of scope. nlink is not checked, because a failed temp removal legitimately leaves 2.
+- **Size defaults** (256 MiB per entry, 4 GiB and 1000 entries per store, 4 MiB metadata) are **Assumed** placeholders, not measured.
+
+</Callout>
+
+## Implementation steps
+
+<Checklist
+  id="steps-checklist"
+  items={[
+    { id: "step-1", label: "1. safefs.OpenRegularIn and ErrNotOwned (PR 1)", note: "Swap tests mirror TestOpenChildDirDetectsSwap; FIFO must not block; marker-free errors." },
+    { id: "step-2", label: "2. Package doc, constants, errors, Decision, Options, ValidID (PR 1)", note: "FR8 table; a seam counts filesystem calls, which must be zero for an invalid ID." },
+    { id: "step-3", label: "3. Open with base validation, root refusal, ensureDir, repair, Repaired, darwin marker (PR 1)", note: "Depends on 1-2. FR1-FR7 at umask 022 and 077; modes 0755, 0750, 01700, 02700; symlinked base and subdirs; symlinked parent allowed." },
+    { id: "step-4", label: "4. ADR 0006, architecture section 12, Linux run as non-root (PR 1)", note: "docker run --user 1000:1000 -e HOME=/tmp golang:1.27 go test ./..." },
+    { id: "step-5", label: "5. redactor.IsClean moved from scanner (PR 2)", note: "Existing scanner tests unchanged and green." },
+    { id: "step-6", label: "6. Metadata DTOs, typed metadata, strict v2 decode, validateRecord, input checks (PR 2)", note: "Corruption table, round-trip with every value type and MaxInt64, 1000 max-size findings with an escape-heavy name either round-trip or are refused." },
+    { id: "step-7", label: "7. Put (PR 3)", note: "Depends on PR 1-2. Order: validate, fstat, pre-marshal, budget, copy, reserve, link content, publish metadata, cleanup." },
+    { id: "step-8", label: "8. Put tests and the follow-up issue (PR 3)", note: "FR12-FR15; a forced failure after each step leaves no valid entry; pre-planted content and metadata.json left unchanged; 0755 source stored as 0600; Linux run." },
+    { id: "step-9", label: "9. Read, Verify, verifyContent (PR 4)", note: "Depends on PR 3." },
+    { id: "step-10", label: "10. Read/Verify tests and marker-name test over every path (PR 4)", note: "FR16-FR21; entry dir modes 0750, 01700, 02700 refused, not repaired; one-byte flip, append and swaps fail Verify." },
+    { id: "step-11", label: "11. Threat-model Quarantine section (PR 4)", note: "Controls, caller constraints, accepted risks." }
+  ]}
+/>
+
+## Verification
+
+- `task test` after each step. Before each PR is marked ready, `task verify` must pass: fmt, lint, test, cross, gosec, govulncheck, gitleaks.
+- Linux run in every PR as non-root (`--user 1000:1000 -e HOME=/tmp`), plus a separate root run for the ownership tests, with results recorded in the PR.
+- Break-the-guard check, then revert. Each change must make a test fail:
+  - drop `ValidID`
+  - drop `fchmod` on content
+  - use `Rename` instead of `Link`
+  - skip the owner check
+  - repair entry dirs instead of refusing them
+  - decode with v1 `encoding/json`
+  - drop the Name redactor check
+  - skip the pre-marshal size check
+- No test touches the real `~/.redactscan`: every test passes a `t.TempDir()` base.
+- Reviews: `staff-engineering-reviewer` and `security-reviewer` on each PR.
