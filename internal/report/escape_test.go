@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/boktavec/redactscan/internal/textsafe"
 )
 
 // noDangerous fails if b has an invalid byte or a dangerous rune other than
@@ -14,7 +16,7 @@ func noDangerous(t *testing.T, label string, b []byte) {
 		t.Fatalf("%s: invalid UTF-8 in %q", label, b)
 	}
 	for _, r := range string(b) {
-		if r != '\n' && isDangerous(r) {
+		if r != '\n' && textsafe.IsDangerous(r) {
 			t.Fatalf("%s: dangerous rune %U in %q", label, r, b)
 		}
 	}

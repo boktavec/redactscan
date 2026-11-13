@@ -16,10 +16,11 @@ import (
 // archive/*, compress/* and internal/safefs: scanners parse untrusted bytes and
 // must not touch the filesystem. Later scanners widen it by a reviewed edit.
 var allowedImports = []string{
-	"context", "crypto/sha256", "encoding/binary", "encoding/hex", "errors", "io", "strings",
+	"context", "crypto/sha256", "encoding/binary", "encoding/hex", "errors", "io", "strings", "unicode/utf8",
 	"github.com/boktavec/redactscan/internal/artifact",
 	"github.com/boktavec/redactscan/internal/finding",
 	"github.com/boktavec/redactscan/internal/scanner",
+	"github.com/boktavec/redactscan/internal/textsafe",
 }
 
 func disallowedImports(t *testing.T, filename string, src any) []string {

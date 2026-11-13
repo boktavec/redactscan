@@ -6,7 +6,7 @@
 // # Escaping
 //
 // Every string taken from a finding or a failure is untrusted. Both renderers
-// escape every dangerous rune (see isDangerous) visibly instead of deleting it:
+// escape every dangerous rune (see textsafe.IsDangerous) visibly instead of deleting it:
 // text writes Go-style escapes such as \x1b or \u202e, JSON writes \uXXXX.
 // In text an invalid UTF-8 byte is written as \xNN and a backslash as \\. In
 // JSON an invalid UTF-8 byte in a field becomes U+FFFD, which is a limit of

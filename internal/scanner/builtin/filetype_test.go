@@ -464,13 +464,23 @@ func TestFileTypeFindingsAreConstant(t *testing.T) {
 	names := []string{
 		"plain.txt", "a\x1b[31m.exe", "x" + string(rune(0x202e)) + "fdp.exe", "\xff\xfe.pdf",
 		"gh" + "p_" + strings.Repeat("A", 36) + ".exe", "a.e\u212Aexe", "[GITHUB_TOKEN_1].sh", ".exe",
+		"report.pdf.exe", "a\u200bb.txt", "gh" + "p_" + strings.Repeat("A", 36) + ".pdf.exe",
 	}
 	contents := [][]byte{nil, elfFile, gzipFile, zipFile, script, plain, pe(0x100, 0x80, true), fat(2)}
 	titles := map[string]string{
-		"filetype.detected": detectedTitle, "filetype.mismatch": mismatchTitle, "filetype.executable_bit": execBitTitle}
+		"filetype.detected": detectedTitle, "filetype.mismatch": mismatchTitle, "filetype.executable_bit": execBitTitle,
+		"filetype.deceptive_name": deceptiveTitle}
 	descs := map[string][]string{
 		"filetype.detected": {detectedDescription, unknownDescription}, "filetype.mismatch": {mismatchDescription},
-		"filetype.executable_bit": {execBitDescription}}
+		"filetype.executable_bit": {execBitDescription}, "filetype.deceptive_name": {deceptiveDescription}}
+	// metadataKeys is the closed key set per finding; mismatch omits extension
+	// when the name has no table extension.
+	metadataKeys := map[string][]string{
+		"filetype.detected":       {"detected_type", "executable_bit"},
+		"filetype.mismatch":       {"claimed_type", "detected_type", "extension"},
+		"filetype.executable_bit": {"detected_type"},
+		"filetype.deceptive_name": {"invisible_rune", "double_extension", "detected_type"},
+	}
 	types := map[any]bool{"elf": true, "macho": true, "pe": true, "zip": true, "gzip": true, "script": true, "unknown": true}
 	claimed := map[any]bool{"unknown": true, "none": true}
 	for _, c := range claims {
@@ -492,6 +502,12 @@ func TestFileTypeFindingsAreConstant(t *testing.T) {
 					t.Errorf("%q %s: extension %v not in table", name, id, v)
 				}
 				for k, v := range f.Metadata {
+					if !contains(metadataKeys[id], k) {
+						t.Errorf("%q %s: unexpected metadata key %s", name, id, k)
+					}
+					if s, ok := v.(string); ok && (strings.IndexByte(s, 0x1b) >= 0 || strings.IndexByte(s, 0xff) >= 0) {
+						t.Errorf("%q %s: metadata %s holds name-like text", name, id, k)
+					}
 					switch v.(type) {
 					case string, bool:
 					default:
@@ -539,6 +555,17 @@ func TestSecretShapedPathFailsClosedForBothScanners(t *testing.T) {
 	}
 }
 
+// TestDeceptiveSecretShapedNameFailsClosed: a name that is both deceptive and
+// secret-shaped still fails closed, like TestSecretShapedPathFailsClosedForBothScanners.
+func TestDeceptiveSecretShapedNameFailsClosed(t *testing.T) {
+	name := "gh" + "p_" + strings.Repeat("A", 36) + "\u202efdp.pdf.exe"
+	res := runAll(t, newArtifact(name, 4), strings.NewReader("abcd"), 4)
+	want := []scanner.Failure{{Scanner: "hash", Reason: scanner.ReasonInvalidFinding}, {Scanner: "filetype", Reason: scanner.ReasonInvalidFinding}}
+	if len(res.Findings) != 0 || len(res.Failures) != 2 || res.Failures[0] != want[0] || res.Failures[1] != want[1] {
+		t.Errorf("result = %+v", res)
+	}
+}
+
 func TestFileTypeShortReadIsIncomplete(t *testing.T) {
 	// The file ends before its recorded size, as a sysfs file or a file
 	// truncated during the scan does.
@@ -560,3 +587,82 @@ func TestFileTypeScannerContract(t *testing.T) {
 }
 
 var _ io.ReaderAt = (*recorder)(nil)
+
+func TestDeceptiveName(t *testing.T) {
+	const id = "filetype.deceptive_name"
+	tests := []struct {
+		name      string
+		file      string
+		content   []byte
+		want      bool
+		sev       finding.Severity
+		invisible bool
+		double    bool
+		detected  string
+		mismatch  bool // the independent filetype.mismatch also fires
+	}{
+		{"bidi override on a PE", "invoice\u202efdp.exe", pe(0x100, 0x80, true), true, finding.SeverityHigh, true, false, "pe", false},
+		{"double extension on a PE", "report.pdf.exe", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"double extension on a script", "photo.jpg.sh", script, true, finding.SeverityMedium, false, true, "script", false},
+		{"double extension on an ELF", "photo.jpg.so", elfFile, true, finding.SeverityHigh, false, true, "elf", false},
+		{"double extension and mismatch", "photo.jpg.sh", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", true},
+		{"spaces before the last dot", "report.pdf  .exe", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"trailing dot and space", "report.pdf.exe. ", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"upper case", "REPORT.PDF.EXE", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"zero width space on unknown", "a\u200bb.txt", plain, true, finding.SeverityMedium, true, false, "unknown", false},
+		{"ANSI escape on unknown", "a\x1b[31m.txt", plain, true, finding.SeverityMedium, true, false, "unknown", false},
+		{"invalid UTF-8 on unknown", "a\xff.txt", plain, true, finding.SeverityMedium, true, false, "unknown", false},
+		{"variation selector", "a\ufe0f.txt", plain, true, finding.SeverityMedium, true, false, "unknown", false},
+		{"both on a script", "a\u202e.pdf.sh", script, true, finding.SeverityMedium, true, true, "script", false},
+		{"plain document", "notes.txt", plain, false, 0, false, false, "unknown", false},
+		{"program before document", "x.exe.pdf", pe(0x100, 0x80, true), false, 0, false, false, "pe", true},
+		{"archive then program", "pack.zip.exe", pe(0x100, 0x80, true), false, 0, false, false, "pe", false},
+		{"two documents", "a.pdf.txt", plain, false, 0, false, false, "unknown", false},
+		{"leading dot only", ".pdf.exe", pe(0x100, 0x80, true), false, 0, false, false, "pe", false},
+		{"double dot before program", "report.pdf..exe", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"dot and space before program", "report.pdf. .exe", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"text middle", "readme.txt.exe", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"docx middle", "report.docx.exe", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"xlsx middle, scr", "report.xlsx.scr", pe(0x100, 0x80, true), true, finding.SeverityHigh, false, true, "pe", false},
+		{"zip final extension", "report.pdf.zip", zipFile, false, 0, false, false, "zip", false},
+		{"valid printable U+FFFD", "a\ufffd.txt", plain, false, 0, false, false, "unknown", false},
+		{"Kelvin sign is printable", "a.e\u212Aexe", plain, false, 0, false, false, "unknown", false},
+		{"Cyrillic homoglyph is printable", "a.t\u0445t", plain, false, 0, false, false, "unknown", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runFileType(t, tt.file, 0o644, tt.content) // fails on an incomplete result
+			f, ok := got[id]
+			if ok != tt.want {
+				t.Fatalf("deceptive_name present = %v, want %v (%v)", ok, tt.want, got)
+			}
+			if _, has := got["filetype.mismatch"]; has != tt.mismatch {
+				t.Errorf("mismatch present = %v, want %v", has, tt.mismatch)
+			}
+			if _, has := got["filetype.detected"]; !has {
+				t.Error("filetype.detected is missing")
+			}
+			if !ok {
+				return
+			}
+			if f.Severity != tt.sev || len(f.Metadata) != 3 || f.Metadata["invisible_rune"] != tt.invisible ||
+				f.Metadata["double_extension"] != tt.double || f.Metadata["detected_type"] != tt.detected {
+				t.Errorf("finding = %+v", f)
+			}
+		})
+	}
+}
+
+// TestDeceptiveNameZipDocuments checks every zip-container document extension
+// as a middle segment, and that plain zip stays out.
+func TestDeceptiveNameZipDocuments(t *testing.T) {
+	for _, ext := range strings.Fields("docx xlsx pptx odt ods odp epub") {
+		got := runFileType(t, "r."+ext+".exe", 0o644, pe(0x100, 0x80, true))
+		if _, ok := got["filetype.deceptive_name"]; !ok {
+			t.Errorf(".%s middle segment not flagged", ext)
+		}
+	}
+	if _, ok := runFileType(t, "r.zip.exe", 0o644, pe(0x100, 0x80, true))["filetype.deceptive_name"]; ok {
+		t.Error("zip middle segment flagged")
+	}
+}
