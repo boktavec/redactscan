@@ -79,7 +79,7 @@ status: complete
 | --- | --- | --- |
 | FR10 | `scanner.ReasonChanged Reason = "changed"` is added. The package doc says `Run` never produces it; callers record it as `{registry, changed}` when the file changed during the scan. | Report golden test with a `changed` failure renders it. |
 | FR11 | After `Run`, the CLI calls `f.Stat()` again on the same descriptor and compares size, mtime (ns) and ctime (ns, from `syscall.Stat_t`: `Ctimespec` on darwin, `Ctim` on linux, in per-OS files). Any difference, or a failing second fstat, appends `{registry, changed}`. | Seam test: a hook between `Run` and the second fstat rewrites the file, giving exit 1 and `changed`. An untouched file is complete. |
-| FR12 | After `Run`, the CLI reads 1 byte at offset `size` with `f.ReadAt`. `n > 0` (bytes appended, or a procfs file with fstat size 0) or any error other than `io.EOF` appends `{registry, changed}`. | Test: an append during the seam gives `changed`. Linux-only test: `scan /proc/self/status` is incomplete (never reported complete). |
+| FR12 | After `Run`, the CLI reads 1 byte at offset `size` with `f.ReadAt`. `n > 0` (bytes appended, or a procfs file with fstat size 0) or any error other than `io.EOF` appends `{registry, changed}`. | Test: an append during the seam gives `changed`. Linux-only test: `scan /proc/<pid>/status` (own pid) is incomplete (never reported complete). |
 | FR13 | Docs (threat model, scanner package doc): the hash is of the bytes as read during this scan, not proof of identity. Quarantine and policy must re-hash their own copy. | Text present. |
 
 ### 2.3 Shared read helper and HashScanner (PR 3)
@@ -210,7 +210,7 @@ D1-D4 have long-term impact and go into ADR 0007, which supersedes ADR 0004 deci
 
 | Risk / failure | Handling |
 | --- | --- |
-| File rewritten in place with the same size, mtime and ctime | Undetectable without a snapshot. Accepted residual risk (threat model). User space cannot set ctime, so this needs root or a filesystem that does not update ctime. |
+| File rewritten in place with the same size, mtime and ctime | Undetectable without a snapshot. Accepted residual risk (threat model). Best effort: an unprivileged writer can also evade the check within the filesystem timestamp granularity (coarse clocks, HFS+ 1 s, FAT/exFAT, some NFS/FUSE) or through a shared writable mmap; only a private snapshot closes it. |
 | Scanners see different bytes if the file changes mid-scan | FR11/FR12 mark the scan incomplete for any detected change. |
 | Truncation during the scan | `readFull` returns `errTruncated`; `Run` records `error`; FR11 also records `changed`. |
 | procfs/sysfs files with fstat size 0 but content | The FR12 probe gives `changed`; incomplete. |
@@ -263,7 +263,7 @@ Five stacked PRs on `feat/redact-37-hash-filetype`; each PR branches from the pr
 4. **PR 1, step 4: `scannertest`.** Counting reader and reworked `AssertNoMutation` (FR7). Tests: self-tests for good and bad fakes.
 5. **PR 1, step 5: CLI open.** `openArtifact` (FR9); keep the fd open across `Run`. Tests: Mode 0755; a sparse over-cap file gives `too large` with zero reads; existing CLI tests migrated. `scanner.Default` is still empty in this PR, so real scans still report `no scanner ran`.
 6. **PR 1, step 6: docs.** ADR 0007, the ADR 0004 note, architecture s5 (Mode) and s7 (contract, cap), artifact-finding-models spec FR1. Run `task verify`.
-7. **PR 2, step 7: change detection.** `ReasonChanged` (FR10), `checkUnchanged` with per-OS ctime (FR11), the probe (FR12), the `afterRun` seam. Tests: a rewrite, an append and a truncation through the seam each give exit 1 and `changed`; an untouched file has no `changed`; Linux-only `/proc/self/status` is incomplete; a report golden for `changed`. Run `task cross`.
+7. **PR 2, step 7: change detection.** `ReasonChanged` (FR10), `checkUnchanged` with per-OS ctime (FR11), the probe (FR12), the `afterRun` seam. Tests: a rewrite, an append and a truncation through the seam each give exit 1 and `changed`; an untouched file has no `changed`; Linux-only `/proc/<pid>/status` is incomplete; a report golden for `changed`. Run `task cross`.
 8. **PR 2, step 8: threat model.** Scanner section per section 7. Run `task verify`.
 9. **PR 3, step 9: `readFull`.** FR14, with the fakes listed there.
 10. **PR 3, step 10: `Hash`.** FR15-FR17. Tests: vectors, cancellation, `AssertNoMutation`, constant text (FR29), metadata types (FR30), the 512 MiB sparse file (skipped with `-short`), allocation independence, `BenchmarkHash`.
@@ -297,5 +297,5 @@ Five stacked PRs on `feat/redact-37-hash-filetype`; each PR branches from the pr
 - Every FR met and tested. `task test` during development; `task cross` passes (386 included); `task verify` succeeds before each PR is marked ready.
 - ADR 0007 written; the ADR 0004 note added; `docs/architecture.md` s5, s7 and s9 and the `docs/threat-model.md` Scanner section and residual risks updated; artifact-finding-models spec FR1 updated.
 - `security-reviewer` runs on each PR diff (file handling, untrusted parsing), alongside `staff-engineering-reviewer`, per the AGENTS.md pipeline.
-- PR descriptions follow `.github/pull_request_template.md`, including manual steps: `chmod +x` a renamed ELF and scan it; scan a `report.pdf.exe`; append to a file during a scan (or scan `/proc/self/status` on Linux); scan a sparse file over 1 GiB and see `too large`.
+- PR descriptions follow `.github/pull_request_template.md`, including manual steps: `chmod +x` a renamed ELF and scan it; scan a `report.pdf.exe`; append to a file during a scan (or scan `/proc/<pid>/status` of a running process on Linux (`/proc/self` is a symlink and is refused)); scan a sparse file over 1 GiB and see `too large`.
 - No new dependencies.
