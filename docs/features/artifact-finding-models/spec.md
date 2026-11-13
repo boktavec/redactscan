@@ -62,7 +62,7 @@ if f.Severity.AtMost(allowMax) { /* allow */ }   // false if either side is inva
 
 | ID | Requirement | Acceptance criteria |
 | --- | --- | --- |
-| FR1 | `artifact.Artifact` and `artifact.SourceMetadata` match architecture section 5. | Fields, names, order and types are exactly: `ID string`, `Path string`, `RelativePath string`, `Name string`, `Size int64`, `MIMEType string`, `SHA256 string`, `Source SourceMetadata`, `Metadata map[string]any`; `SourceMetadata{Type string; URI string}`. Doc comments per section 3.1. |
+| FR1 | `artifact.Artifact` and `artifact.SourceMetadata` match architecture section 5. | Fields, names, order and types are exactly: `ID string`, `Path string`, `RelativePath string`, `Name string`, `Size int64`, `Mode fs.FileMode`, `MIMEType string`, `SHA256 string`, `Source SourceMetadata`, `Metadata map[string]any`; `SourceMetadata{Type string; URI string}`. Doc comments per section 3.1. `Mode` (permission bits only, filled from fstat on the scanned descriptor) was added by REDACT-37 ([ADR 0007](../../adr/0007-scanner-bounded-readerat-and-1gib-cap.md)). |
 | FR2 | `finding.Finding` matches architecture section 6. | Fields exactly: `ID string`, `Severity Severity`, `Category string`, `Title string`, `Description string`, `ArtifactID string`, `File string`, `Line int`, `Evidence string`, `Metadata map[string]any`. Doc comments per section 3.3. |
 | FR3 | Severity values and order. | `SeverityInvalid = 0`, `SeverityInfo = 1`, `SeverityLow = 2`, `SeverityMedium = 3`, `SeverityHigh = 4`, `SeverityCritical = 5`. `Finding{}.Severity == SeverityInvalid`. |
 | FR4 | `Valid()` | True exactly for 1..5. False for 0, -1, 6, 99, `math.MinInt`, `math.MaxInt`. |

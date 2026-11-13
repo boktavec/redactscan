@@ -13,7 +13,7 @@ import (
 
 // allowedImports is the FR21 allowlist. Widening it takes a reviewed edit.
 var allowedImports = []string{
-	"cmp", "context", "errors", "fmt", "slices", "sort", "strings", "unicode/utf8",
+	"cmp", "context", "errors", "fmt", "io", "slices", "sort", "strings", "unicode/utf8",
 	"github.com/boktavec/redactscan/internal/artifact",
 	"github.com/boktavec/redactscan/internal/finding",
 	"github.com/boktavec/redactscan/internal/redactor",
@@ -46,7 +46,7 @@ func TestPackageImportsAreAllowed(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && d.Name() == "scannertest" {
+		if d.IsDir() && (d.Name() == "scannertest" || d.Name() == "builtin") {
 			return filepath.SkipDir
 		}
 		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

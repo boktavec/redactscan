@@ -1,0 +1,164 @@
+---
+title: "HashScanner and FileTypeScanner: streaming SHA-256 and real file types from bytes"
+---
+
+## Outcome
+
+`redactscan scan FILE` reports the file's SHA-256 and its real type detected from magic bytes, and flags extension spoofing, an executable bit on non-executable content, and deceptive names such as `report.pdf.exe`. Files up to 1 GiB are hashed in 64 KiB chunks and never read whole into memory. These are the first production scanners, so a scan of an ordinary file becomes complete (exit 0). Story: [REDACT-37](http://localhost:8080/issue/REDACT-37). Full spec: `docs/features/hash-filetype-scanners/spec.md`. Decision record to write: `docs/adr/0007` (bounded ReaderAt contract and 1 GiB cap; supersedes ADR 0004 decisions 1-3). Every `security-reviewer` requirement (R1-R10) is included.
+
+Concrete example: an ELF binary renamed to `invoice.pdf` with `chmod +x`.
+
+<Code
+  id="example-report"
+  filename="redactscan scan ./invoice.pdf (exit 0)"
+  language="text"
+  code={"redactscan scan report\nstatus: complete\n\n== high (1) ==\n- filetype.mismatch: File content does not match its extension\n  file: ./invoice.pdf\n  category: filetype\n  reasoning: The bytes identify a different file type than the extension claims.\n  metadata: claimed_type=\"document\", detected_type=\"elf\", extension=\".pdf\"\n\n== info (2) ==\n- filetype.detected: File type detected from content\n  metadata: detected_type=\"elf\", executable_bit=true\n- hash.sha256: SHA-256 of file content\n  metadata: sha256=\"<64 hex>\", size=8432\n"}
+/>
+
+<Callout id="scope-callout" tone="info">
+
+**In scope:** the `io.ReaderAt` scanner contract with an opaque bounded wrapper; a 1 GiB cap; `Artifact.Mode`; change detection during the scan in the CLI; a new `internal/scanner/builtin` package with `hash` and `filetype`; the findings `hash.sha256`, `filetype.detected`, `filetype.mismatch`, `filetype.executable_bit` and `filetype.deceptive_name`; `internal/textsafe` shared with the report. **Non-goals:** a `MaxInMemoryRead` helper (follow-up), filling `Artifact.SHA256`, archive or binary parsing, polyglot detection, `scan ./dir`, deadlines and SIGINT handling (REDACT-39), a findings exit code (REDACT-50), MIME detection for text and images.
+
+</Callout>
+
+## Delivery: five stacked PRs
+
+The story estimate was about 350 lines. The security requirements and the deceptive-name finding roughly double it, so the work is split to keep each PR under about 500 changed lines.
+
+<Table
+  id="pr-table"
+  columns={["PR", "Contents", "Size", "Depends on"]}
+  rows={[
+    ["PR 1", "Scanner contract: Scan(ctx, a, r io.ReaderAt, size int64); boundedReader; Run pre-checks (invalid artifact, size < 0, nil reader, a.Size != size, then too large) with zero reads; MaxContentSize 1 GiB; Artifact.Mode; scannertest counting reader; CLI openArtifact (fstat, no read); ADR 0007, ADR 0004 note, architecture s5/s7", "about 450", "-"],
+    ["PR 2", "CLI change detection: ReasonChanged, re-fstat (size, mtime ns, ctime ns per OS), 1-byte probe at size, afterRun seam, Linux procfs test; threat model TOCTOU and residual risks", "about 250", "PR 1"],
+    ["PR 3", "internal/scanner/builtin: readFull, Hash (manual 64 KiB loop), Default() moves here, import allowlist, 512 MiB sparse-file and allocation tests, BenchmarkHash", "about 300", "PR 2"],
+    ["PR 4", "FileType: 512-byte header, magic detection (ELF, Mach-O thin and fat, PE with signature, ZIP, gzip, shebang), claim table, ASCII extension folding, mismatch, executable bit, FuzzDetect", "about 450", "PR 3"],
+    ["PR 5", "internal/textsafe.IsDangerous extracted from report; filetype.deceptive_name (invisible runes, invalid UTF-8, document-before-executable double extension)", "about 200", "PR 4"]
+  ]}
+/>
+
+## How a scan reads the file
+
+<Diagram id="flow-diagram" frame="show" caption="The CLI opens and fstats once, Run hands every scanner the same opaque ReaderAt bounded to the fstat size, and the CLI checks afterwards that the file did not change.">
+
+```html
+<div class="grid">
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">internal/cli</div>
+    <div class="diagram-node">safefs.OpenRegular</div>
+    <div class="diagram-node">f.Stat: size, Mode.Perm, mtime, ctime</div>
+    <div class="diagram-node">after Run: re-fstat + 1-byte probe at size</div>
+    <div class="diagram-pill">changed: {registry, changed}</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">scanner.Run</div>
+    <div class="diagram-node">checks before any read</div>
+    <div class="diagram-node">boundedReader: ReadAt only, [0, size)</div>
+    <div class="diagram-node">isolation, finding checks, sort (unchanged)</div>
+  </div>
+  <div class="diagram-panel" data-rough>
+    <div class="diagram-muted">scanner/builtin</div>
+    <div class="diagram-node">hash: 64 KiB chunks, ctx per chunk</div>
+    <div class="diagram-node">filetype: 512-byte header, +4 bytes for PE</div>
+    <div class="diagram-node">readFull: short read is an error</div>
+  </div>
+</div>
+```
+
+```css
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.diagram-panel { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+```
+
+</Diagram>
+
+## Key decisions
+
+<Table
+  id="decisions-table"
+  columns={["#", "Decision", "Why", "Rejected"]}
+  rows={[
+    ["D1", "io.ReaderAt plus size, wrapped by Run in an opaque boundedReader", "Meets the large-file AC; planned in ADR 0004; scanners cannot reach the *os.File (SectionReader.Outer would leak it)", "Caller-side hashing; keep []byte"],
+    ["D2", "MaxContentSize 1 GiB (Assumed)", "About 1 s of SHA-256; the CI benchmark records the real figure in ADR 0007", "4 GiB; no cap; 10 MiB"],
+    ["D3", "Artifact.Mode from f.Stat() on the scanned fd", "Typed, and from the same fd as the bytes", "Metadata key; extra Scan argument"],
+    ["D4", "CLI re-fstat and probe after Run", "Live reads lose the single snapshot; appends, truncation, rewrites and procfs files fail closed", "No detection; private snapshot copy"],
+    ["D5", "Hash as an info finding hash.sha256 with {sha256, size}", "No Result or JSON schema change", "Result field and schema v2"],
+    ["D6", "Fixed claim table; unknown extension on ELF/Mach-O/PE is a mismatch; no extension allowed for ELF/Mach-O/script", "Deterministic; Metadata holds only constants", "Known extensions only; mime package"],
+    ["D8", "Scanners in internal/scanner/builtin, which owns Default()", "scanner stays agnostic; own import allowlist", "Scanners inside scanner"],
+    ["D9", "IsDangerous moves to internal/textsafe", "One rule for report escaping and deceptive names", "Copying the function"],
+    ["D10", "Offset-0 magic only, no debug/* or archive/* parsers", "Smallest attack surface on hostile bytes", "Stdlib binary parsers"]
+  ]}
+/>
+
+## Findings
+
+<Table
+  id="findings-table"
+  columns={["ID", "When", "Severity", "Metadata"]}
+  rows={[
+    ["hash.sha256", "Always", "info", "sha256 (64 lowercase hex), size (int64)"],
+    ["filetype.detected", "Always", "info", "detected_type, executable_bit (bool)"],
+    ["filetype.mismatch", "Claim from the extension table does not accept the detected type; unknown extension on ELF/Mach-O/PE; no extension on PE", "high for elf/macho/pe, else medium", "claimed_type, detected_type, extension (table constant)"],
+    ["filetype.executable_bit", "Executable bit set on zip, gzip or unknown content", "low", "detected_type"],
+    ["filetype.deceptive_name", "Name has a dangerous rune or invalid UTF-8, or a document extension before an executable one", "high for elf/macho/pe, else medium", "invisible_rune, double_extension, detected_type"]
+  ]}
+/>
+
+Detection, first match wins and every check is length-checked first: ELF `7F 45 4C 46`; Mach-O thin (four magics) and fat `CAFEBABE`/`CAFEBABF` only with `1 <= nfat < 45`, so Java class files are not matched; PE needs `MZ`, `e_lfanew` read as a little-endian uint32 into an int64, `>= 0x40` and `+4 <= min(size, 4096)`, then `PE\0\0` from one extra 4-byte read; ZIP `PK\x03\x04`, `PK\x05\x06`, `PK\x07\x08`; gzip `1F 8B 08`; script `#!`. The ELF, Mach-O, gzip, ZIP and PE constants are **Verified** against go1.27.2 stdlib sources. The byte-swapped Mach-O forms, fat64 and the `nfat < 45` rule are **Assumed**.
+
+## Files touched
+
+<FileTree
+  id="files-tree"
+  title="Files touched"
+  entries={[
+    { path: "internal/scanner/scanner.go", change: "modified", note: "ReaderAt interface, 1 GiB cap, ReasonChanged, contract doc" },
+    { path: "internal/scanner/bounded.go", change: "added", note: "boundedReader, fixed errors" },
+    { path: "internal/scanner/run.go", change: "modified", note: "pre-checks before any read, wrapping" },
+    { path: "internal/scanner/registry.go", change: "modified", note: "Default removed (PR 3)" },
+    { path: "internal/scanner/scannertest/scannertest.go", change: "modified", note: "counting reader, AssertNoMutation bounds" },
+    { path: "internal/scanner/builtin/read.go", change: "added", note: "readFull" },
+    { path: "internal/scanner/builtin/hash.go", change: "added", note: "Hash scanner" },
+    { path: "internal/scanner/builtin/filetype.go", change: "added", note: "FileType scanner and findings" },
+    { path: "internal/scanner/builtin/claims.go", change: "added", note: "extension claim table and compatibility" },
+    { path: "internal/scanner/builtin/name.go", change: "added", note: "extension, double extension, deceptive runes" },
+    { path: "internal/scanner/builtin/builtin.go", change: "added", note: "Default() registry" },
+    { path: "internal/textsafe/textsafe.go", change: "added", note: "IsDangerous moved from report" },
+    { path: "internal/report/escape.go", change: "modified", note: "uses textsafe.IsDangerous" },
+    { path: "internal/artifact/artifact.go", change: "modified", note: "Mode fs.FileMode" },
+    { path: "internal/cli/scan.go", change: "modified", note: "openArtifact, change checks, builtin.Default" },
+    { path: "internal/cli/filestate_linux.go", change: "added", note: "ctime from Stat_t.Ctim" },
+    { path: "internal/cli/filestate_darwin.go", change: "added", note: "ctime from Stat_t.Ctimespec" },
+    { path: "docs/adr/0007-scanner-readerat-contract.md", change: "added", note: "D1-D4" },
+    { path: "docs/threat-model.md", change: "modified", note: "live-read TOCTOU, residual risks" },
+    { path: "docs/architecture.md", change: "modified", note: "sections 5, 7, 9" }
+  ]}
+/>
+
+## Risks and residual risks
+
+<Callout id="risk-callout" tone="risk">
+
+- An in-place rewrite that keeps size, mtime and ctime is undetectable; the hash describes the bytes as read, so quarantine and policy must re-hash their own copy.
+- The executable bit is not the same as executable (ACLs, `noexec`, FAT/SMB); findings say "executable bit set".
+- Offset-0 magic misses polyglots and appended ZIPs; `MZ` without a PE signature is `unknown`.
+- Network or FUSE reads can block: there is no per-scanner timeout and no SIGINT handling (REDACT-39).
+- A secret-shaped path makes the registry drop every finding, so the scan is incomplete (fail closed).
+
+</Callout>
+
+## Verification
+
+<Checklist
+  id="verify-checklist"
+  items={[
+    { id: "v-bounded", label: "boundedReader: no Chmod/Name/Fd/Outer, EOF at and past size, negative offset rejected, OS errors hidden" },
+    { id: "v-run", label: "Run pre-checks record the right failure with zero ReadAt calls, including size == MaxContentSize+1 and typed-nil *os.File" },
+    { id: "v-change", label: "A rewrite, append or truncation through the afterRun seam gives exit 1 and changed; /proc/self/status is incomplete on Linux" },
+    { id: "v-hash", label: "Hash vectors, a 512 MiB sparse file matches the reference, allocations are independent of size, BenchmarkHash figure recorded in ADR 0007" },
+    { id: "v-detect", label: "Every magic fixture, e_lfanew and nfat edge cases, Java class, and FuzzDetect (no panic, at most 2 reads, no read past size)" },
+    { id: "v-names", label: "Extension edge cases (.EXE, trailing dot or space, Kelvin sign, invalid UTF-8) and deceptive names (U+202E, double extension) built at runtime" },
+    { id: "v-constant", label: "Constant Title/Description/Category and closed Metadata value sets for every finding, through Registry.Run" },
+    { id: "v-verify", label: "task test, task cross (386 included) and task verify pass for each PR" }
+  ]}
+/>

@@ -28,18 +28,27 @@ type fakeScanner struct {
 	err      error
 	panics   bool
 	scanned  *[]byte
+	// sawSize, when set, receives the size Scan was given.
+	sawSize *int64
 	// fileIsPath sets every finding's File to the artifact path.
 	fileIsPath bool
 }
 
 func (f fakeScanner) Name() string                  { return f.name }
 func (fakeScanner) Supports(artifact.Artifact) bool { return true }
-func (f fakeScanner) Scan(_ context.Context, a artifact.Artifact, content []byte) ([]finding.Finding, error) {
+func (f fakeScanner) Scan(_ context.Context, a artifact.Artifact, r io.ReaderAt, size int64) ([]finding.Finding, error) {
 	if f.panics {
 		panic("canary-panic")
 	}
+	if f.sawSize != nil {
+		*f.sawSize = size
+	}
 	if f.scanned != nil {
-		*f.scanned = append([]byte(nil), content...)
+		content, err := io.ReadAll(io.NewSectionReader(r, 0, size))
+		if err != nil {
+			return nil, err
+		}
+		*f.scanned = content
 	}
 	if f.fileIsPath {
 		fs := append([]finding.Finding(nil), f.findings...)
@@ -189,19 +198,36 @@ func TestScanIncompleteKeepsOtherFindings(t *testing.T) {
 	}
 }
 
+// sparse creates a file of the given size without writing its content.
+func sparse(t *testing.T, size int64) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "big.bin")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		_ = f.Close()
+		t.Skipf("file system cannot make a sparse file of %d bytes: %v", size, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestScanSizeCap(t *testing.T) {
-	var seen []byte
-	useScanners(t, fakeScanner{name: "a", scanned: &seen})
-	atCap := writeTemp(t, strings.Repeat("a", scanner.MaxContentSize))
-	if got := run([]string{"scan", atCap}, strings.NewReader("")); got.code != 0 || len(seen) != scanner.MaxContentSize {
-		t.Errorf("at cap: code %d, scanned %d bytes, stderr %q", got.code, len(seen), got.stderr)
+	saw := int64(-1)
+	useScanners(t, fakeScanner{name: "a", sawSize: &saw})
+
+	if got := run([]string{"scan", sparse(t, scanner.MaxContentSize)}, strings.NewReader("")); got.code != 0 || saw != scanner.MaxContentSize {
+		t.Errorf("at cap: code %d, scanner saw size %d, stderr %q", got.code, saw, got.stderr)
 	}
 
-	seen = nil
-	over := writeTemp(t, strings.Repeat("a", scanner.MaxContentSize+1))
-	got := run([]string{"scan", over}, strings.NewReader(""))
-	if got.code != 1 || got.stderr != "" || !strings.Contains(got.stdout, "- file exceeds 10 MiB limit\n") || seen != nil {
-		t.Errorf("over cap: got %+v, scanned %d bytes", got, len(seen))
+	saw = -1
+	got := run([]string{"scan", sparse(t, scanner.MaxContentSize+1)}, strings.NewReader(""))
+	if got.code != 1 || got.stderr != "" || !strings.Contains(got.stdout, "- file exceeds 1 GiB limit\n") || saw != -1 {
+		t.Errorf("over cap: got %+v, scanner saw size %d", got, saw)
 	}
 }
 
@@ -305,15 +331,16 @@ func assertNoDangerousRune(t *testing.T, out string) {
 	}
 }
 
-func TestReadArtifact(t *testing.T) {
+func TestOpenArtifact(t *testing.T) {
 	path := writeTemp(t, "12345")
 	var errb strings.Builder
-	a, content, code := readArtifact(path, &errb)
-	if code != exitOK || string(content) != "12345" {
-		t.Fatalf("code %d content %q stderr %q", code, content, errb.String())
+	a, f, code := openArtifact(path, &errb)
+	if code != exitOK {
+		t.Fatalf("code %d stderr %q", code, errb.String())
 	}
+	defer func() { _ = f.Close() }()
 	want := artifact.Artifact{
-		ID: "file-1", Path: path, RelativePath: path, Name: filepath.Base(path), Size: 5,
+		ID: "file-1", Path: path, RelativePath: path, Name: filepath.Base(path), Size: 5, Mode: 0o600,
 		Source: artifact.SourceMetadata{Type: "file"},
 	}
 	if !reflect.DeepEqual(a, want) {
@@ -322,7 +349,39 @@ func TestReadArtifact(t *testing.T) {
 	if err := a.Validate(); err != nil {
 		t.Error(err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Error(err)
+	// Nothing was read: the descriptor is still at offset 0.
+	if got, err := io.ReadAll(f); err != nil || string(got) != "12345" {
+		t.Errorf("file content = %q, %v", got, err)
+	}
+}
+
+// TestOpenArtifactMode checks that Mode keeps permission bits only and comes
+// from the opened file.
+func TestOpenArtifactMode(t *testing.T) {
+	for _, mode := range []os.FileMode{0o644, 0o755, 0o400} {
+		path := writeTemp(t, "x")
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		a, f, code := openArtifact(path, io.Discard)
+		if code != exitOK {
+			t.Fatalf("mode %v: code %d", mode, code)
+		}
+		_ = f.Close()
+		if a.Mode != mode {
+			t.Errorf("Mode = %v, want %v", a.Mode, mode)
+		}
+	}
+}
+
+func TestOpenArtifactRefusal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+	var errb strings.Builder
+	a, f, code := openArtifact(path, &errb)
+	if code != exitIO || f != nil || !reflect.DeepEqual(a, artifact.Artifact{}) {
+		t.Errorf("code %d, file %v, artifact %+v", code, f, a)
+	}
+	if want := `redactscan: cannot open "` + path + `": not found` + "\n"; errb.String() != want {
+		t.Errorf("stderr = %q, want %q", errb.String(), want)
 	}
 }
