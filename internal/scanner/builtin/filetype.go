@@ -41,6 +41,9 @@ const (
 	mismatchTitle       = "File content does not match its extension"
 	mismatchDescription = "The bytes identify a different file type than the extension claims."
 
+	deceptiveTitle       = "Deceptive file name"
+	deceptiveDescription = "The file name has invisible or control characters, invalid text, or a document-style extension before a program extension."
+
 	execBitTitle       = "Executable bit set on non-program content"
 	execBitDescription = "The file mode has an executable bit set, but the content is an archive or has no recognized program signature."
 )
@@ -74,17 +77,25 @@ func (FileType) Scan(_ context.Context, a artifact.Artifact, r io.ReaderAt, size
 	found := []finding.Finding{newFinding("filetype.detected", finding.SeverityInfo, detectedTitle, desc,
 		map[string]any{"detected_type": detected, "executable_bit": execBit})}
 
+	sev := finding.SeverityMedium
+	if detected == typeELF || detected == typeMachO || detected == typePE {
+		sev = finding.SeverityHigh
+	}
+
 	ext, hasExt := extension(a.Name)
 	if claimed, ok := mismatch(ext, hasExt, detected); ok {
-		sev := finding.SeverityMedium
-		if detected == typeELF || detected == typeMachO || detected == typePE {
-			sev = finding.SeverityHigh
-		}
 		meta := map[string]any{"claimed_type": claimed, "detected_type": detected}
 		if _, known := claims[ext]; known {
 			meta["extension"] = "." + ext
 		}
 		found = append(found, newFinding("filetype.mismatch", sev, mismatchTitle, mismatchDescription, meta))
+	}
+
+	// Independent of the mismatch: a deceptive name can sit on honest content.
+	invisible, double := hasInvisibleRune(a.Name), doubleExtension(a.Name)
+	if invisible || double {
+		found = append(found, newFinding("filetype.deceptive_name", sev, deceptiveTitle, deceptiveDescription,
+			map[string]any{"invisible_rune": invisible, "double_extension": double, "detected_type": detected}))
 	}
 
 	if execBit && (detected == typeZip || detected == typeGzip || detected == typeUnknown) {
