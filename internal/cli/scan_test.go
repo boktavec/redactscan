@@ -170,11 +170,15 @@ func TestScanEscapesUntrustedFields(t *testing.T) {
 	hostileID := "id\x1b[31m\r\u202ex"
 	useScanners(t, fakeScanner{name: "a", findings: []finding.Finding{
 		finding1(hostileID, finding.SeverityLow, hostile, 3, "title \x1b\u202e"),
+		finding1("ok-id", finding.SeverityLow, hostile, 3, "title \x1b\u202e"),
 	}})
 	got := run([]string{"scan", writeTemp(t, "x")}, strings.NewReader(""))
-	want := `low "id\x1b[31m\r\u202ex" "a\x1b[31m\rb\u202ec\xff":3 "title \x1b\u202e"` + "\n"
-	if got.stdout != want {
-		t.Errorf("stdout = %q, want %q", got.stdout, want)
+	// The hostile ID is not an identifier, so that finding is dropped as
+	// invalid; File and Title may still carry hostile runes and are escaped.
+	want := result{1, `low "ok-id" "a\x1b[31m\rb\u202ec\xff":3 "title \x1b\u202e"` + "\n",
+		"redactscan: scan incomplete: a: invalid finding\nredactscan: scan incomplete: 1 findings\n"}
+	if got != want {
+		t.Errorf("got %+v\nwant %+v", got, want)
 	}
 	for _, bad := range []string{"\x1b", "\r", "\u202e", "\xff"} {
 		if strings.Contains(got.stdout+got.stderr, bad) {
@@ -206,15 +210,17 @@ func TestScanPrintsOnlyAllowlistedFields(t *testing.T) {
 	f.Evidence = canary("evidence")
 	f.Description = canary("description")
 	f.Category = canary("category")
-	f.Metadata = map[string]any{canary("key"): canary("value")}
+	f.Metadata = map[string]any{"canary_key_zzzzzz": canary("value")} // keys must match the metadata key grammar
 	useScanners(t, fakeScanner{name: "a", findings: []finding.Finding{f}})
 
 	got := run([]string{"scan", writeTemp(t, "x")}, strings.NewReader(""))
 	if got.code != 0 || got.stdout == "" {
 		t.Fatalf("got %+v", got)
 	}
-	if strings.Contains(got.stdout+got.stderr, "canary-") {
-		t.Errorf("a canary was printed: %+v", got)
+	for _, c := range []string{"canary-", "canary_"} {
+		if strings.Contains(got.stdout+got.stderr, c) {
+			t.Errorf("a canary was printed: %+v", got)
+		}
 	}
 }
 
