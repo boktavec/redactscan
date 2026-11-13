@@ -174,6 +174,8 @@ The caller opens the file once through `safefs`, reads at most `scanner.MaxConte
 
 `scanner.NewRegistry` builds an explicit, ordered, immutable list of scanners (no global registration). `Registry.Run` runs them one at a time and is fail-closed: a returned error, a panic, an invalid finding, cancellation, an over-cap file, too many findings, an invalid artifact or no scanner having run is recorded as a `Failure` with a fixed reason, the `Result` is incomplete, and the findings from scanners that did work are kept. Findings are checked (cheap checks first: bounds, UTF-8 and the grammars `^[a-z0-9][a-z0-9._-]*$` for ID and Category, `^[a-z][a-z0-9_]{0,63}$` for Metadata keys, Category at most 64 bytes, Description at most 1 KiB; then the `redactor`: ID, Title, File, Evidence and string Metadata values may hold only label-like text, while Category, Description and Metadata keys must hold nothing it detects; at most 1000 accepted per run, checked first) and sorted deterministically. The scanner contract is in the `internal/scanner` package doc.
 
+`internal/report` renders a `scanner.Result` for `scan` as a text report or, with `-json`, a versioned JSON document (`schema_version` 1). It escapes every untrusted string visibly, writes once, and takes `status` only from `Result.Incomplete()`. See [ADR 0005](adr/0005-report-escaping-and-versioned-json.md).
+
 Initial scanners:
 
 ```text

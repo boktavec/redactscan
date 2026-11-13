@@ -19,7 +19,7 @@ const (
 
 const usageText = `Usage:
   redactscan redact [-quiet | -json] [-stdout] [-force] [FILE|-]
-  redactscan scan FILE
+  redactscan scan [-json] FILE
 
 Replaces covered secret formats in FILE (or stdin when FILE is "-" or absent)
 with numbered labels. Covered formats: AWS access keys, AWS secret keys,
@@ -51,12 +51,20 @@ Options:
   -force    replace an existing output file (file output only)
 
 scan reads FILE (never executes it) through the same symlink-refusing open as
-redact and runs every registered scanner over it, printing one stdout line per
-finding: SEVERITY "ID" "FILE"[:LINE] "TITLE". Failure lines and a summary go
-to stderr.
-Files over 10 MiB are not scanned. The output format and the scan exit codes
-(0 complete, 1 incomplete, 2 usage, 3 I/O error) are provisional. No scanners
-are registered yet, so scans report incomplete until scanners are added.
+redact and runs every registered scanner over it. Stdout gets one report:
+text by default, or with -json one JSON object whose schema_version (now 1)
+changes only for a breaking change. The report holds status (complete or
+incomplete), the findings, the failures and a summary; stderr stays empty on
+success and carries only errors that stop the report. Untrusted strings are
+escaped, never printed raw. Flags must come before FILE. BREAKING: the stdout
+format changed, and failure lines and the summary moved from stderr to stdout.
+Files over 10 MiB are not scanned. No scanners are registered yet, so scans
+report incomplete until scanners are added.
+
+Consumers: check the exit code first (0 complete, 1 incomplete, 2 usage, 3
+I/O or report error), and treat empty or unparseable output as a failed scan,
+never as a passing scan. In JSON an invalid UTF-8 byte in a file name is shown
+as U+FFFD.
 
 Exit codes (redact):
   0  success, or help requested

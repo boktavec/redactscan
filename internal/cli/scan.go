@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -11,7 +10,7 @@ import (
 	"strconv"
 
 	"github.com/boktavec/redactscan/internal/artifact"
-	"github.com/boktavec/redactscan/internal/finding"
+	"github.com/boktavec/redactscan/internal/report"
 	"github.com/boktavec/redactscan/internal/safefs"
 	"github.com/boktavec/redactscan/internal/scanner"
 )
@@ -24,16 +23,17 @@ const scanArtifactID = "file-1"
 // never changes it.
 var defaultRegistry = scanner.Default
 
-// registryFailureText is the stderr text for failures not tied to a scanner.
-var registryFailureText = map[scanner.Reason]string{
-	scanner.ReasonTooLarge:        "file exceeds 10 MiB limit",
-	scanner.ReasonInvalidArtifact: "invalid artifact",
-	scanner.ReasonNoScanner:       "no scanner ran",
-}
+// renderText and renderJSON are seams: tests replace them to inject renderer
+// errors. Production never changes them.
+var (
+	renderText = report.Text
+	renderJSON = report.JSON
+)
 
 func runScan(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fl.SetOutput(io.Discard)
+	asJSON := fl.Bool("json", false, "")
 	if err := fl.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, _ = io.WriteString(stdout, usageText)
@@ -56,13 +56,19 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	}
 	res := reg.Run(context.Background(), a, content)
 
-	stdoutFailed := writeFindings(stdout, res.Findings)
-	printFailures(stderr, res)
-	switch {
-	case stdoutFailed:
-		_, _ = io.WriteString(stderr, "redactscan: cannot write output: write failed\n")
+	render := renderText
+	if *asJSON {
+		render = renderJSON
+	}
+	if err := render(stdout, res); err != nil {
+		if errors.Is(err, report.ErrWrite) {
+			_, _ = io.WriteString(stderr, "redactscan: cannot write output: write failed\n")
+		} else {
+			_, _ = io.WriteString(stderr, "redactscan: internal error: cannot render report\n")
+		}
 		return exitIO
-	case res.Incomplete():
+	}
+	if res.Incomplete() {
 		return exitIncomplete
 	}
 	return exitOK
@@ -92,48 +98,4 @@ func readArtifact(path string, stderr io.Writer) (artifact.Artifact, []byte, int
 		Size:         int64(len(content)),
 		Source:       artifact.SourceMetadata{Type: "file"},
 	}, content, exitOK
-}
-
-// writeFindings prints one line per finding with a single Write and reports
-// whether the write failed. Only severity, ID, File, Line and Title are
-// printed; the untrusted strings are quoted so control and bidi characters
-// appear escaped.
-func writeFindings(w io.Writer, findings []finding.Finding) (failed bool) {
-	var buf bytes.Buffer
-	for _, f := range findings {
-		buf.WriteString(f.Severity.String())
-		buf.WriteByte(' ')
-		buf.WriteString(strconv.Quote(f.ID))
-		buf.WriteByte(' ')
-		buf.WriteString(strconv.Quote(f.File))
-		if f.Line > 0 {
-			buf.WriteString(":" + strconv.Itoa(f.Line))
-		}
-		buf.WriteByte(' ')
-		buf.WriteString(strconv.Quote(f.Title))
-		buf.WriteByte('\n')
-	}
-	if buf.Len() == 0 {
-		return false
-	}
-	n, err := w.Write(buf.Bytes())
-	return err != nil || n != buf.Len()
-}
-
-// printFailures writes one line per failure and the summary to stderr. Lines
-// are built from validated scanner names and constant reasons only. Write
-// errors are ignored: there is nowhere left to report them.
-func printFailures(w io.Writer, res scanner.Result) {
-	for _, fl := range res.Failures {
-		text, ok := registryFailureText[fl.Reason]
-		if fl.Scanner != scanner.RegistryName || !ok {
-			text = fl.Scanner + ": " + string(fl.Reason)
-		}
-		_, _ = fmt.Fprintf(w, "redactscan: scan incomplete: %s\n", text)
-	}
-	state := "complete"
-	if res.Incomplete() {
-		state = "incomplete"
-	}
-	_, _ = fmt.Fprintf(w, "redactscan: scan %s: %d findings\n", state, len(res.Findings))
 }
