@@ -1,0 +1,30 @@
+redactscan scan report
+status: incomplete
+
+== critical (1) ==
+- c: Title c
+
+== high (1) ==
+- full: Title full
+  file: ./install.sh:12
+  category: execution
+  reasoning: Runs a script.
+  evidence: curl | sh
+  metadata: b=true, f=0.5, i=40, i64=1099511627776, s="a\"b", z="last"
+
+== medium (1) ==
+- m: Title m
+
+== low (1) ==
+- l: Title l
+
+== info (2) ==
+- i: Title i
+- file-only: T
+  file: a.txt
+
+failures (2):
+- file exceeds 10 MiB limit
+- filetype: panic
+
+summary: incomplete, 6 findings (critical 1, high 1, medium 1, low 1, info 2)

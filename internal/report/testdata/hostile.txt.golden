@@ -1,0 +1,15 @@
+redactscan scan report
+status: incomplete
+
+== high (1) ==
+- ida\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z: titlea\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z
+  file: f\xffa\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z:7
+  category: cata\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z
+  reasoning: desca\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z
+  evidence: eva\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z
+  metadata: ka\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z="va\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ \"\r\n� z", n=3
+
+failures (1):
+- sa\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z: ra\x1b[31m\u009b\u202e\u2066\u200b\ufeff\u2028\U000e0041\u034f\ufe0f\U000e0100\u3164\u17b4\x7f\u0085\\ "\r\n� z
+
+summary: incomplete, 1 finding (critical 0, high 1, medium 0, low 0, info 0)

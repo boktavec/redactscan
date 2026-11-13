@@ -1,0 +1,1 @@
+{"schema_version":1,"status":"incomplete","summary":{"total":0,"by_severity":{"critical":0,"high":0,"medium":0,"low":0,"info":0}},"findings":[],"failures":[{"scanner":"registry","reason":"no scanner"}]}
