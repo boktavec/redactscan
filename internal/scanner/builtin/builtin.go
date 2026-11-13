@@ -10,5 +10,5 @@ import "github.com/boktavec/redactscan/internal/scanner"
 
 // Default returns the production registry.
 func Default() (*scanner.Registry, error) {
-	return scanner.NewRegistry(Hash{})
+	return scanner.NewRegistry(Hash{}, FileType{})
 }

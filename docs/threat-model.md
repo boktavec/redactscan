@@ -203,7 +203,7 @@ Accepted risks: a swap to a symlink resolving to the same directory is indisting
 
 ## Scanner (`internal/scanner`, `scan` command)
 
-`redactscan scan FILE` runs every registered scanner over one file and prints findings. See `docs/features/scanner-scan-file/spec.md` and ADR 0004. The only production scanner so far is `hash` (`internal/scanner/builtin`), which reports the SHA-256 as an info finding. Report output is covered by `docs/features/scan-reports/spec.md` and ADR 0005.
+`redactscan scan FILE` runs every registered scanner over one file and prints findings. See `docs/features/scanner-scan-file/spec.md` and ADR 0004. The production scanners so far, in `internal/scanner/builtin`, are `hash` (SHA-256 as an info finding) and `filetype` (type from magic bytes, extension mismatch, executable bit). Report output is covered by `docs/features/scan-reports/spec.md` and ADR 0005.
 
 ### Trust boundary
 
@@ -223,6 +223,14 @@ Scanned content is untrusted, and so is scanner output, because it is derived fr
 - **Finding field contract.** Cheap checks run before any redactor call. ID and Category (which may be empty) must match `^[a-z0-9][a-z0-9._-]*$` (ID at most 128 bytes, Category at most 64), Metadata keys must match `^[a-z][a-z0-9_]{0,63}$`, and Description is valid UTF-8 of at most 1024 bytes. Then the redactor checks each field in turn: ID, Title, File, Evidence and string Metadata values may contain only label-like text, while Category, Description and Metadata keys (a lowercase key such as `ghp_` plus 36 letters passes the grammar) must contain nothing it detects, labels included. The 64 and 1024 byte limits are assumed sizes. Scanners must use constant text for Description and Category (REDACT-37 scanner tests must assert this).
 - **Registry.** Names are validated, unique and captured once; `registry` is reserved for failures not tied to a scanner.
 - **Scanner contract.** Scanners must not modify `a.Metadata`, read outside the content they are given, spawn goroutines that outlive `Scan`, exit the process, or put scanned content in errors or panics. `scannertest.AssertNoMutation` checks mutation in each scanner's tests.
+
+### File type detection
+
+- **Fixed-offset magic only.** `filetype` reads at most 512 bytes at offset 0 and 4 bytes at `e_lfanew` for a possible PE file, never past `size`, and parses nothing else. Every check is length-checked first, offsets are widened to `int64` before arithmetic, and a short read is an error (incomplete), never `unknown`. Detection is fuzzed.
+- **Detection limits.** Only offset 0 is examined, so a polyglot, an archive appended to another file, or a signature later in the file is not seen. An `MZ` file without a valid PE signature is `unknown`. A fat Mach-O with 45 or more architectures is `unknown` (a class file shares the magic). Only six types are detected; everything else is `unknown`, and the finding says so without implying the file is safe. A PE file whose `e_lfanew` is below 0x40 (overlapping or tiny-PE headers) or whose signature lies beyond the first 4 KiB is reported as `unknown`, so such a program named `invoice.pdf` gets only `filetype.detected` with `unknown` (info) and no mismatch (Assumed from public PE research that such files can load; not tested). Non-ASCII or homoglyph extensions (for example a Cyrillic letter in `.txt`) on script, zip or gzip content are not flagged. Follow-up candidates, needing a spec decision: accept a low `e_lfanew` when the signature lies inside the 512-byte header, or add a separate `dos_mz` type.
+- **Extension rules.** The extension is folded byte by byte in ASCII (never `strings.ToLower`, which maps the Kelvin sign to `k`), trailing dots and spaces are ignored, and a dotfile has none. Claims come from a fixed table; name text never reaches a finding. An unlisted extension on an ELF, Mach-O or PE file is a mismatch (`claimed_type` `unknown`). A missing extension is a mismatch only for PE (`claimed_type` `none`); ELF, Mach-O, zip, gzip and script files may lack one.
+- **Executable bit is not "executable".** The bit comes from fstat on the scanned descriptor. ACLs, `noexec` mounts, FAT or SMB shares that report 0777, and Windows (no bit) make it unreliable in both directions, so the finding says "executable bit set" and is low severity.
+- **Secret-shaped paths fail closed.** A `RelativePath` that looks like a secret makes the registry drop every finding of both scanners as invalid; the scan is incomplete (exit 1) and the path is never printed.
 
 ### Exit codes
 
