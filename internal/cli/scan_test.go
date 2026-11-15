@@ -149,7 +149,7 @@ func TestScanSecretShapedPathIsIncomplete(t *testing.T) {
 	}
 	got := run([]string{"scan", path}, strings.NewReader(""))
 	token := filepath.Base(path)
-	if got.code != exitIncomplete || got.stderr != "" || !strings.Contains(got.stdout, "- hash: invalid finding") ||
+	if got.code != exitIncomplete || got.stderr != "" || !strings.Contains(got.stdout, "- hash: invalid finding") || !strings.Contains(got.stdout, "- filetype: invalid finding") ||
 		strings.Contains(got.stdout, "hash.sha256") || strings.Contains(got.stdout+got.stderr, token) {
 		t.Errorf("got %+v", got)
 	}

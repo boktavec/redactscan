@@ -16,7 +16,7 @@ import (
 // archive/*, compress/* and internal/safefs: scanners parse untrusted bytes and
 // must not touch the filesystem. Later scanners widen it by a reviewed edit.
 var allowedImports = []string{
-	"context", "crypto/sha256", "encoding/hex", "errors", "io",
+	"context", "crypto/sha256", "encoding/binary", "encoding/hex", "errors", "io", "strings",
 	"github.com/boktavec/redactscan/internal/artifact",
 	"github.com/boktavec/redactscan/internal/finding",
 	"github.com/boktavec/redactscan/internal/scanner",

@@ -25,13 +25,24 @@ func newArtifact(name string, size int64) artifact.Artifact {
 	return artifact.Artifact{ID: "file-1", Path: "/abs/dir/" + name, RelativePath: name, Name: name, Size: size}
 }
 
-func runHash(t *testing.T, a artifact.Artifact, r io.ReaderAt, size int64) scanner.Result {
+func runWith(t *testing.T, reg func() (*scanner.Registry, error), a artifact.Artifact, r io.ReaderAt, size int64) scanner.Result {
 	t.Helper()
-	reg, err := Default()
+	reg1, err := reg()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return reg.Run(context.Background(), a, r, size)
+	return reg1.Run(context.Background(), a, r, size)
+}
+
+// runHash runs only the hash scanner; runAll runs the production registry.
+func runHash(t *testing.T, a artifact.Artifact, r io.ReaderAt, size int64) scanner.Result {
+	t.Helper()
+	return runWith(t, func() (*scanner.Registry, error) { return scanner.NewRegistry(Hash{}) }, a, r, size)
+}
+
+func runAll(t *testing.T, a artifact.Artifact, r io.ReaderAt, size int64) scanner.Result {
+	t.Helper()
+	return runWith(t, Default, a, r, size)
 }
 
 func sum(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
