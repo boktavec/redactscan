@@ -334,7 +334,7 @@ func assertNoDangerousRune(t *testing.T, out string) {
 func TestOpenArtifact(t *testing.T) {
 	path := writeTemp(t, "12345")
 	var errb strings.Builder
-	a, f, code := openArtifact(path, &errb)
+	a, f, _, code := openArtifact(path, &errb)
 	if code != exitOK {
 		t.Fatalf("code %d stderr %q", code, errb.String())
 	}
@@ -363,7 +363,7 @@ func TestOpenArtifactMode(t *testing.T) {
 		if err := os.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}
-		a, f, code := openArtifact(path, io.Discard)
+		a, f, _, code := openArtifact(path, io.Discard)
 		if code != exitOK {
 			t.Fatalf("mode %v: code %d", mode, code)
 		}
@@ -377,7 +377,7 @@ func TestOpenArtifactMode(t *testing.T) {
 func TestOpenArtifactRefusal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing")
 	var errb strings.Builder
-	a, f, code := openArtifact(path, &errb)
+	a, f, _, code := openArtifact(path, &errb)
 	if code != exitIO || f != nil || !reflect.DeepEqual(a, artifact.Artifact{}) {
 		t.Errorf("code %d, file %v, artifact %+v", code, f, a)
 	}

@@ -23,8 +23,9 @@ status: incomplete
 - file-only: T
   file: a.txt
 
-failures (2):
+failures (3):
 - file exceeds 1 GiB limit
+- file changed during the scan
 - filetype: panic
 
 summary: incomplete, 6 findings (critical 1, high 1, medium 1, low 1, info 2)

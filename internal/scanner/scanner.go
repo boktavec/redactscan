@@ -27,7 +27,9 @@
 // reach the underlying file, and replaces read errors, which can carry paths,
 // with fixed text. It reads nothing itself, so the content is read live, once
 // per scanner: a file that changes during the scan can give scanners different
-// bytes, and the caller must detect that.
+// bytes, and the caller must detect that. A hash of the content describes the
+// bytes read during this scan, not the file's identity; quarantine and policy
+// must re-hash their own copy.
 //
 // Registry.Run drops a finding that breaks the field contract in check.go
 // (identifier grammars for ID, Category and Metadata keys, size limits, UTF-8,
@@ -69,8 +71,9 @@ type Scanner interface {
 	Scan(ctx context.Context, a artifact.Artifact, r io.ReaderAt, size int64) ([]finding.Finding, error)
 }
 
-// Reason says why a scanner, or the registry, did not complete cleanly. These
-// are the only values Run produces.
+// Reason says why a scanner, or the registry, did not complete cleanly. Run
+// produces every value except ReasonChanged: a caller records
+// {RegistryName, ReasonChanged} when the file changed during the scan.
 type Reason string
 
 const (
@@ -82,6 +85,7 @@ const (
 	ReasonInvalidArtifact Reason = "invalid artifact"
 	ReasonNoScanner       Reason = "no scanner"
 	ReasonTooManyFindings Reason = "too many findings"
+	ReasonChanged         Reason = "changed"
 )
 
 // Failure records one abnormal outcome. It carries no error or panic text.

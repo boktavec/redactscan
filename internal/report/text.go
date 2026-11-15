@@ -14,6 +14,7 @@ var registryFailureText = map[scanner.Reason]string{
 	scanner.ReasonTooLarge:        "file exceeds 1 GiB limit",
 	scanner.ReasonInvalidArtifact: "invalid artifact",
 	scanner.ReasonNoScanner:       "no scanner ran",
+	scanner.ReasonChanged:         "file changed during the scan",
 }
 
 // textGroups is the five real severities, then the invalid group (FR11).
