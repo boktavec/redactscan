@@ -54,6 +54,7 @@ Read the relevant skill file before starting that kind of work. The files live i
 These MCP servers are configured for the user's local Claude Code (this repo has no project `.mcp.json`). Check that a server is connected before relying on it; tool names and availability can vary by client.
 
 - **`context7`** provides current third-party library documentation. Use it before using an unfamiliar library: inspect the version in `go.mod`, then consult current docs. Do not invent APIs. The repository and the threat model remain the authority for RedactScan requirements and decisions.
+- **`youtrack`** is the source of truth for RedactScan stories (project `REDACT`, board `Kanban` at `http://localhost:8080`). Story URLs have the form `http://localhost:8080/issue/REDACT-<n>`; use that URL, not just the ID, wherever a story is linked. Read the story and its dependency links before planning. Search before creating a story to avoid duplicates. Delete projects, boards, or stories only when the user explicitly requests it. See "YouTrack Workflow".
 - **`plan`** (hosted Agent-Native Plan MCP) is not used. `visual-plan` runs in local-files mode: plans are MDX under `plans/<slug>/`, checked with `npx @agent-native/core@latest plan local check` and viewed through a localhost bridge, so plan content is not uploaded. Do not call hosted Plan tools. Never commit `.plan-url` (a local token file).
 
 Keep MCP credentials out of the repository and do not paste them into issues, plans, logs, or PRs. If a server is unavailable, say which lookup could not be completed and continue with the work that does not depend on it.
@@ -64,12 +65,22 @@ All planning must use the `visual-plan` skill in local-files mode; the `senior-e
 
 PRs marked ready for review get a visual recap from `.github/workflows/pr-visual-recap.yml` (draft PRs are skipped; pushes do not re-run it, so add the `recap` label to regenerate). Use `visual-recap` to preview one locally. The workflow disables AGENTS.md loading for the recap agent so it does not run the checks below; normal CI owns testing and security verification.
 
+## YouTrack Workflow
+
+The main agent keeps the story's state current (subagents do not have YouTrack access):
+
+- **Story started:** when work on a story begins (the user says to start it, or its branch or worktree is created), set the story to **In Progress** (`State In Progress`).
+- **PR merged:** after verifying the PR is merged, set the story to **Done** (`State Done`) and tick its acceptance criteria. An open PR does not make a story Done.
+- Link the story URL in the PR description, and add the spec link to the story once the spec exists.
+- If a story cannot move because of a missing state or a failing command, say so rather than editing the board configuration.
+
 ## Agent Pipeline
 
 Agent definitions live in `.claude/agents/` (Claude Code) and `.pi/agents/` (Pi); the Pi definitions reuse the corresponding Claude prompt as their role source of truth. Agents do not invoke one another; the main agent orchestrates the pipeline using the client's available subagent mechanism:
 
 1. **Plan:** use `senior-engineering-planner` to interview the user (relay one question at a time, resuming it with the answer), which saves the spec and creates the local visual plan itself. For new trust boundaries or security-sensitive design, have `security-reviewer` review the design before seeking approval and incorporate its requirements.
-2. **Implement:** after the user approves the plan, use `senior-software-engineer` with the spec path. Run parallel implementers in separate worktrees or sequentially; never in the same files at once.
+   **Pseudo-code handoff:** the user wants to practise problem solving and coding, so the planner does not write the solution. When its questions are done it gives the user a worksheet (inputs, outputs, existing code to read, requirements) and the user writes the pseudo-code. The planner reviews it against the spec and, once it is accepted, saves it in the spec. Relay this phase one message at a time like the interview.
+2. **Implement:** after the user approves the plan and the user's pseudo-code is saved in the spec (or the user explicitly waives it), use `senior-software-engineer` with the spec path. The implementer turns the user's pseudo-code into code, follows its structure and decisions, and reports any deviation instead of silently redesigning. Run parallel implementers in separate worktrees or sequentially; never in the same files at once.
 3. **Review:** use `staff-engineering-reviewer` with the spec path, the diff, and the implementer's handoff. Independently use `security-reviewer` for changes that touch file or path handling, symlinks, quarantine, redaction, scanned-content parsing, secrets, or CI credentials; give it the same context. Do not substitute the general reviewer's security checks.
 4. **Fix loop:** on CHANGES REQUIRED from either reviewer, resume the implementer with the findings, then re-run the relevant reviewer. Repeat until the staff reviewer reports PASS or PASS WITH ADVISORIES and, when invoked, the security reviewer reports PASS.
 5. **Escalate to the user** (do not loop) on planning-level findings, a security BLOCK or NEEDS CONTEXT, reviewer BLOCKED / INCONCLUSIVE, risks requiring human acceptance, or after 3 review rounds without approval.
