@@ -3,6 +3,7 @@ package scanner
 import (
 	"cmp"
 	"context"
+	"io"
 	"slices"
 
 	"github.com/boktavec/redactscan/internal/artifact"
@@ -10,14 +11,17 @@ import (
 )
 
 // Run scans one artifact with every supported scanner, in registry order and
-// one at a time. See the package doc and ADR 0004 for the failure rules.
-func (r *Registry) Run(ctx context.Context, a artifact.Artifact, content []byte) Result {
-	if a.Validate() != nil {
+// one at a time. r holds size bytes and a.Size must equal size. Nothing is read
+// from r before the artifact, size and reader checks pass. See the package doc
+// and ADR 0007 for the failure rules.
+func (r *Registry) Run(ctx context.Context, a artifact.Artifact, ra io.ReaderAt, size int64) Result {
+	if a.Validate() != nil || size < 0 || ra == nil || a.Size != size {
 		return Result{Failures: []Failure{{RegistryName, ReasonInvalidArtifact}}}
 	}
-	if len(content) > MaxContentSize {
+	if size > MaxContentSize {
 		return Result{Failures: []Failure{{RegistryName, ReasonTooLarge}}}
 	}
+	content := &boundedReader{ra, size}
 
 	var res Result
 	record := func(name string, reason Reason) {
@@ -46,7 +50,7 @@ func (r *Registry) Run(ctx context.Context, a artifact.Artifact, content []byte)
 
 		var found []finding.Finding
 		var err error
-		if !call(func() { found, err = e.s.Scan(ctx, a, content) }) {
+		if !call(func() { found, err = e.s.Scan(ctx, a, content, size) }) {
 			record(e.name, ReasonPanic)
 			continue
 		}

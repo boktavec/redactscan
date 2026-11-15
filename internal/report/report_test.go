@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -247,5 +248,12 @@ func TestWriteIsSingleAndFailuresAreErrWrite(t *testing.T) {
 				t.Errorf("%s %s: err = %v, want ErrWrite", r.name, name, err)
 			}
 		}
+	}
+}
+
+func TestTooLargeTextMatchesScannerCap(t *testing.T) {
+	want := fmt.Sprintf("file exceeds %d GiB limit", scanner.MaxContentSize>>30)
+	if got := registryFailureText[scanner.ReasonTooLarge]; got != want || scanner.MaxContentSize%(1<<30) != 0 {
+		t.Errorf("too large text = %q, want %q", got, want)
 	}
 }

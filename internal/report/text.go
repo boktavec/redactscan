@@ -11,7 +11,7 @@ import (
 
 // registryFailureText is the fixed text for failures not tied to a scanner.
 var registryFailureText = map[scanner.Reason]string{
-	scanner.ReasonTooLarge:        "file exceeds 10 MiB limit",
+	scanner.ReasonTooLarge:        "file exceeds 1 GiB limit",
 	scanner.ReasonInvalidArtifact: "invalid artifact",
 	scanner.ReasonNoScanner:       "no scanner ran",
 }

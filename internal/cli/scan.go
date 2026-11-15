@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 
@@ -45,16 +46,17 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return usageError(stderr, "scan expects exactly one FILE argument (flags must come before FILE)")
 	}
 
-	a, content, code := readArtifact(fl.Arg(0), stderr)
+	a, f, code := openArtifact(fl.Arg(0), stderr)
 	if code != exitOK {
 		return code
 	}
+	defer func() { _ = f.Close() }()
 	reg, err := defaultRegistry()
 	if err != nil {
 		_, _ = io.WriteString(stderr, "redactscan: internal error: invalid scanner registry\n")
 		return exitIncomplete
 	}
-	res := reg.Run(context.Background(), a, content)
+	res := reg.Run(context.Background(), a, f, a.Size)
 
 	render := renderText
 	if *asJSON {
@@ -74,19 +76,19 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// readArtifact opens path through safefs and reads at most
-// scanner.MaxContentSize+1 bytes, so an over-cap file is detectable without
-// reading it all. On failure it prints the message and returns exitIO.
-func readArtifact(path string, stderr io.Writer) (artifact.Artifact, []byte, int) {
+// openArtifact opens path through safefs and describes it from one fstat of the
+// opened descriptor, so size and mode belong to the file that is scanned.
+// Nothing is read: scanners read through the returned file, which the caller
+// closes. On failure it prints the message and returns exitIO.
+func openArtifact(path string, stderr io.Writer) (artifact.Artifact, *os.File, int) {
 	f, err := safefs.OpenRegular(path)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "redactscan: cannot open %s: %s\n", strconv.Quote(path), openReason(err))
 		return artifact.Artifact{}, nil, exitIO
 	}
-	defer func() { _ = f.Close() }()
-
-	content, err := io.ReadAll(io.LimitReader(f, scanner.MaxContentSize+1))
+	fi, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		_, _ = fmt.Fprintf(stderr, "redactscan: cannot read %s: read failed\n", strconv.Quote(path))
 		return artifact.Artifact{}, nil, exitIO
 	}
@@ -95,7 +97,8 @@ func readArtifact(path string, stderr io.Writer) (artifact.Artifact, []byte, int
 		Path:         path,
 		RelativePath: path,
 		Name:         filepath.Base(path),
-		Size:         int64(len(content)),
+		Size:         fi.Size(),
+		Mode:         fi.Mode().Perm(),
 		Source:       artifact.SourceMetadata{Type: "file"},
-	}, content, exitOK
+	}, f, exitOK
 }

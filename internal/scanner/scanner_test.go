@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"runtime"
 	"strings"
@@ -31,7 +32,7 @@ type fake struct {
 	err         error
 	supportsBad panicMode
 	scanBad     panicMode
-	onScan      func(ctx context.Context, content []byte)
+	onScan      func(ctx context.Context, r io.ReaderAt)
 
 	scans    int
 	nameCall int
@@ -45,13 +46,13 @@ func (f *fake) Supports(artifact.Artifact) bool {
 	return !f.unsupported
 }
 
-func (f *fake) Scan(ctx context.Context, _ artifact.Artifact, content []byte) ([]finding.Finding, error) {
+func (f *fake) Scan(ctx context.Context, _ artifact.Artifact, r io.ReaderAt, _ int64) ([]finding.Finding, error) {
 	f.scans++
 	if f.order != nil {
 		*f.order = append(*f.order, f.name)
 	}
 	if f.onScan != nil {
-		f.onScan(ctx, content)
+		f.onScan(ctx, r)
 	}
 	misbehave(f.scanBad)
 	return f.findings, f.err
@@ -72,7 +73,12 @@ func misbehave(m panicMode) {
 
 var _ Scanner = (*fake)(nil)
 
-var art = artifact.Artifact{ID: "file-1", Path: "p", RelativePath: "p", Name: "p"}
+const body = "content"
+
+var art = artifact.Artifact{ID: "file-1", Path: "p", RelativePath: "p", Name: "p", Size: int64(len(body))}
+
+// content returns a fresh reader over body, matching art.Size.
+func content() io.ReaderAt { return strings.NewReader(body) }
 
 func fnd(id string, sev finding.Severity) finding.Finding {
 	return finding.Finding{ID: id, Severity: sev, ArtifactID: art.ID, Title: "t " + id}
@@ -89,7 +95,7 @@ func newReg(t *testing.T, ss ...Scanner) *Registry {
 
 func run(t *testing.T, ss ...Scanner) Result {
 	t.Helper()
-	return newReg(t, ss...).Run(context.Background(), art, []byte("content"))
+	return newReg(t, ss...).Run(context.Background(), art, content(), art.Size)
 }
 
 func ids(fs []finding.Finding) []string {
@@ -152,14 +158,14 @@ func TestNewRegistryValidation(t *testing.T) {
 func TestNewRegistryCapturesNameOnce(t *testing.T) {
 	f := &changingName{}
 	r := newReg(t, f)
-	res := r.Run(context.Background(), art, nil)
+	res := r.Run(context.Background(), art, content(), art.Size)
 	if f.calls != 1 {
 		t.Errorf("Name called %d times, want 1", f.calls)
 	}
 	assertFailures(t, res, Failure{RegistryName, ReasonNoScanner}) // Supports is false
 	f.supports = true
 	f.err = errors.New("x")
-	res = r.Run(context.Background(), art, nil)
+	res = r.Run(context.Background(), art, content(), art.Size)
 	assertFailures(t, res, Failure{"first", ReasonError}, Failure{RegistryName, ReasonNoScanner})
 }
 
@@ -178,7 +184,7 @@ func (c *changingName) Name() string {
 	return "Bad Name"
 }
 func (c *changingName) Supports(artifact.Artifact) bool { return c.supports }
-func (c *changingName) Scan(context.Context, artifact.Artifact, []byte) ([]finding.Finding, error) {
+func (c *changingName) Scan(context.Context, artifact.Artifact, io.ReaderAt, int64) ([]finding.Finding, error) {
 	return nil, c.err
 }
 
@@ -187,7 +193,7 @@ func TestDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertFailures(t, r.Run(context.Background(), art, nil), Failure{RegistryName, ReasonNoScanner})
+	assertFailures(t, r.Run(context.Background(), art, content(), art.Size), Failure{RegistryName, ReasonNoScanner})
 }
 
 func TestRunOrderAndSupports(t *testing.T) {
@@ -227,27 +233,11 @@ func TestRunNoScannerRan(t *testing.T) {
 	}
 }
 
-func TestRunSizeCap(t *testing.T) {
-	f := &fake{name: "a", findings: []finding.Finding{fnd("a", finding.SeverityLow)}}
-	r := newReg(t, f)
-
-	res := r.Run(context.Background(), art, make([]byte, MaxContentSize))
-	if f.scans != 1 || res.Incomplete() || len(res.Findings) != 1 {
-		t.Errorf("at cap: scans=%d result=%+v", f.scans, res)
-	}
-
-	res = r.Run(context.Background(), art, make([]byte, MaxContentSize+1))
-	if f.scans != 1 || len(res.Findings) != 0 {
-		t.Errorf("over cap: scans=%d findings=%d", f.scans, len(res.Findings))
-	}
-	assertFailures(t, res, Failure{RegistryName, ReasonTooLarge})
-}
-
 func TestRunInvalidArtifact(t *testing.T) {
 	f := &fake{name: "a"}
 	bad := art
 	bad.Metadata = map[string]any{"k": func() {}}
-	res := newReg(t, f).Run(context.Background(), bad, nil)
+	res := newReg(t, f).Run(context.Background(), bad, content(), art.Size)
 	if f.scans != 0 {
 		t.Error("scanner ran for an invalid artifact")
 	}
@@ -259,7 +249,7 @@ func TestRunContext(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		a, b := &fake{name: "a"}, &fake{name: "b"}
-		res := newReg(t, a, b).Run(ctx, art, nil)
+		res := newReg(t, a, b).Run(ctx, art, content(), art.Size)
 		if a.scans+b.scans != 0 {
 			t.Error("a scanner ran after cancel")
 		}
@@ -270,9 +260,9 @@ func TestRunContext(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		a := &fake{name: "a", findings: []finding.Finding{fnd("a", finding.SeverityLow)},
-			onScan: func(context.Context, []byte) { cancel() }}
+			onScan: func(context.Context, io.ReaderAt) { cancel() }}
 		b, c := &fake{name: "b"}, &fake{name: "c"}
-		res := newReg(t, a, b, c).Run(ctx, art, nil)
+		res := newReg(t, a, b, c).Run(ctx, art, content(), art.Size)
 		if b.scans+c.scans != 0 {
 			t.Error("a scanner ran after cancel")
 		}
@@ -285,8 +275,8 @@ func TestRunContext(t *testing.T) {
 	t.Run("error after cancel is canceled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		a := &fake{name: "a", err: errors.New("x"), onScan: func(context.Context, []byte) { cancel() }}
-		res := newReg(t, a).Run(ctx, art, nil)
+		a := &fake{name: "a", err: errors.New("x"), onScan: func(context.Context, io.ReaderAt) { cancel() }}
+		res := newReg(t, a).Run(ctx, art, content(), art.Size)
 		assertFailures(t, res, Failure{"a", ReasonCanceled}, Failure{RegistryName, ReasonNoScanner})
 	})
 }

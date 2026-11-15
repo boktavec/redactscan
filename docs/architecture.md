@@ -109,6 +109,7 @@ type Artifact struct {
     RelativePath string
     Name         string
     Size         int64
+    Mode         fs.FileMode // permission bits only, from fstat of the scanned descriptor
     MIMEType     string
     SHA256       string
     Source       SourceMetadata
@@ -166,11 +167,11 @@ Scanners should be pluggable.
 type Scanner interface {
     Name() string
     Supports(a artifact.Artifact) bool
-    Scan(ctx context.Context, a artifact.Artifact, content []byte) ([]finding.Finding, error)
+    Scan(ctx context.Context, a artifact.Artifact, r io.ReaderAt, size int64) ([]finding.Finding, error)
 }
 ```
 
-The caller opens the file once through `safefs`, reads at most `scanner.MaxContentSize+1` bytes and passes them in as `content`, so scanners never open files. A file over `MaxContentSize` is not scanned (no scanner runs and the result is incomplete); content is never truncated (a planned later change moves to a bounded `io.ReaderAt`). This adds `content` to the earlier sketch; see [ADR 0004](adr/0004-scanner-contract-content-and-isolation.md).
+The caller opens the file once through `safefs` and passes the file and its size to `Registry.Run`; nothing is read into memory by the caller, and scanners never open files. `Run` checks the artifact, the size and the reader before any read, then hands each scanner an opaque bounded `io.ReaderAt` that cannot reach the underlying file and returns only fixed-text errors. A file over `MaxContentSize` (1 GiB) is not scanned (no scanner runs and the result is incomplete); content is never truncated. Scanners read the file live, so a caller must detect a file that changes during the scan. See [ADR 0007](adr/0007-scanner-bounded-readerat-and-1gib-cap.md), which supersedes decisions 1-3 of [ADR 0004](adr/0004-scanner-contract-content-and-isolation.md).
 
 `scanner.NewRegistry` builds an explicit, ordered, immutable list of scanners (no global registration). `Registry.Run` runs them one at a time and is fail-closed: a returned error, a panic, an invalid finding, cancellation, an over-cap file, too many findings, an invalid artifact or no scanner having run is recorded as a `Failure` with a fixed reason, the `Result` is incomplete, and the findings from scanners that did work are kept. Findings are checked (cheap checks first: bounds, UTF-8 and the grammars `^[a-z0-9][a-z0-9._-]*$` for ID and Category, `^[a-z][a-z0-9_]{0,63}$` for Metadata keys, Category at most 64 bytes, Description at most 1 KiB; then the `redactor`: ID, Title, File, Evidence and string Metadata values may hold only label-like text, while Category, Description and Metadata keys must hold nothing it detects; at most 1000 accepted per run, checked first) and sorted deterministically. The scanner contract is in the `internal/scanner` package doc.
 

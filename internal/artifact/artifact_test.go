@@ -31,3 +31,10 @@ func TestSourceTypeConstants(t *testing.T) {
 		t.Errorf("Source constants = %v, want %v", got, want)
 	}
 }
+
+func TestArtifactModeZeroValueHasNoPermissionBits(t *testing.T) {
+	t.Parallel()
+	if m := (Artifact{}).Mode; m != 0 || m&0o111 != 0 {
+		t.Errorf("zero Mode = %v, want no permission bits", m)
+	}
+}

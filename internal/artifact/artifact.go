@@ -13,6 +13,7 @@ package artifact
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 )
 
 // ErrInvalidArtifact is wrapped by every Artifact.Validate failure.
@@ -34,6 +35,11 @@ type Artifact struct {
 	Name string
 	// Size is filled by ingest; zero when unknown.
 	Size int64
+	// Mode holds permission bits only (Mode &^ fs.ModePerm == 0). Ingest fills
+	// it from Stat on the descriptor that is scanned, never from Lstat on a
+	// path, so it describes the same file as the bytes. The zero value means no
+	// permission bits are known to be set.
+	Mode fs.FileMode
 	// MIMEType is filled by ingest; empty when unknown.
 	MIMEType string
 	// SHA256 is lowercase hex from ingest. Not validated here. Check
