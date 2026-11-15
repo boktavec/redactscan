@@ -42,16 +42,24 @@ func disallowedImports(t *testing.T, filename string, src any) []string {
 }
 
 func TestPackageImportsAreAllowed(t *testing.T) {
+	visited := map[string]bool{}
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && (d.Name() == "scannertest" || d.Name() == "builtin") {
-			return filepath.SkipDir
+		if d.IsDir() && (path == "scannertest" || path == "builtin") {
+			return filepath.SkipDir // builtin has its own allowlist test; match the exact paths
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if d.IsDir() {
 			return nil
 		}
+		if foreignSource(path) {
+			t.Errorf("%s: only Go source is allowed (assembly, cgo and similar files bypass the import check)", path)
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		visited[path] = true
 		if bad := disallowedImports(t, path, nil); len(bad) > 0 {
 			t.Errorf("%s imports %q outside the allowlist; %s", path, bad, forbiddenNote)
 		}
@@ -59,6 +67,28 @@ func TestPackageImportsAreAllowed(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, want := range []string{"scanner.go", "run.go", "registry.go", "check.go"} {
+		if !visited[want] {
+			t.Errorf("%s was not checked", want)
+		}
+	}
+}
+
+// foreignSource reports whether path is a compiled or linked source file that
+// is not Go, which the import allowlist cannot see.
+func foreignSource(path string) bool {
+	return slices.Contains([]string{".s", ".S", ".syso", ".c", ".h", ".cc", ".cpp", ".cxx", ".m", ".f", ".swig"}, filepath.Ext(path))
+}
+
+func TestForeignSourceIsDetected(t *testing.T) {
+	for _, name := range []string{"x.s", "x.S", "x.syso", "x.c", "x.h", "x.cc", "x.cpp", "x.cxx", "x.m", "x.f", "x.swig"} {
+		if !foreignSource(name) {
+			t.Errorf("%s not detected", name)
+		}
+	}
+	if foreignSource("x.go") || foreignSource("x_test.go") {
+		t.Error("Go source flagged")
 	}
 }
 

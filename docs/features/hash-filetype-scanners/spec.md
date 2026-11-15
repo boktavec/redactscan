@@ -86,7 +86,7 @@ status: complete
 
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
-| FR14 (R3) | `builtin.readFull(r io.ReaderAt, p []byte, off int64) error`: success when `n == len(p)`, even if `ReadAt` also returned `io.EOF`. `n < len(p)` returns `errTruncated` (fixed text "content shorter than its size"). Never returns or wraps the reader's error. | Fakes: `(len, io.EOF)` succeeds; `(short, nil)`, `(short, EIO)`, `(0, io.EOF)` at offset 0 with `size > 0` all give `errTruncated`; the error text never contains a path from a `*fs.PathError` fake. |
+| FR14 (R3) | `builtin.readFull(r io.ReaderAt, p []byte, off int64) error`: success when `n == len(p)` and the error is nil or `io.EOF`; a full read with any other error is `errTruncated` too. `n < len(p)` returns `errTruncated` (fixed text "content shorter than its size"). Never returns or wraps the reader's error. | Fakes: `(len, io.EOF)` succeeds; `(short, nil)`, `(short, EIO)`, `(0, io.EOF)` at offset 0 with `size > 0` all give `errTruncated`; the error text never contains a path from a `*fs.PathError` fake. |
 | FR15 (R8) | `hash` scanner (`Name() == "hash"`, `Supports` always true): a manual loop over a single 64 KiB buffer (no `io.Copy`/`io.CopyBuffer`, so no `WriterTo`/`ReaderFrom` bypass), `readFull` for each chunk, `ctx.Err()` checked before each chunk. Exactly `size` bytes are hashed. | Vectors: empty content gives `e3b0c442...b855`; `abc` gives `ba7816bf...15ad`. A cancelled ctx gives `{hash, canceled}` through `Run`. |
 | FR16 | One finding: ID `hash.sha256`, severity info, Category `hash`, Title "SHA-256 of file content", Description "SHA-256 digest of the bytes read during this scan.", `ArtifactID = a.ID`, `File = a.RelativePath`, Metadata `{sha256: <lowercase hex>, size: int64(size)}`. | Through `Registry.Run`: `sha256` matches `^[0-9a-f]{64}$`; `size` is an `int64` equal to the input size. |
 | FR17 | A large file is hashed without being read into memory. | A sparse temp file of 512 MiB is hashed through `Run` and matches a reference hash computed in the test with `io.Copy`; allocations (`runtime.MemStats` delta or `testing.AllocsPerRun`) are the same for 1 MiB and 512 MiB within a small constant. Skipped with `-short`. `BenchmarkHash` reports MB/s. |
@@ -182,7 +182,7 @@ One file holding `IsDangerous` and its doc comment, plus the rune-class tests mo
 | # | Decision | Rationale | Alternatives | ADR |
 | --- | --- | --- | --- | --- |
 | D1 | `io.ReaderAt` plus `size`, wrapped by `Run` in an opaque bounded type (Q1 = A, R1). | Meets "hash large files without full read"; it is the migration ADR 0004 planned; the wrapper stops scanners reaching the `*os.File` (`SectionReader.Outer()` would expose it). | Caller hashes while reading (special case for over-cap files); keep `[]byte` (fails the AC). | 0007 |
-| D2 | `MaxContentSize` 1 GiB, Assumed (Q4 = A). | About 1 s of SHA-256 (Assumed; `BenchmarkHash` measures it on the CI runner and ADR 0007 records the figure); easy to raise later. | 4 GiB; no cap; keep 10 MiB. | 0007 |
+| D2 | `MaxContentSize` 1 GiB, Assumed (Q4 = A). | Measured with `BenchmarkHash` on an idle machine: 950-1003 MB/s on darwin/arm64 (about 1.1 s per GiB) and 3.15-3.26 GB/s on linux/arm64 (about 0.33 s per GiB); ADR 0007 records the command and hardware. A CI-runner figure is pending. Easy to raise later. | 4 GiB; no cap; keep 10 MiB. | 0007 |
 | D3 | `Artifact.Mode`: permission bits from `f.Stat()` on the scanned fd (Q2 = A, R5). | Typed, from the same fd as the bytes; ingest can fill it later. | Metadata key; extra `Scan` argument. | 0007 |
 | D4 | Change detection in the CLI by re-fstat (size, mtime ns, ctime ns) and a 1-byte probe at `size` (R2). | Live reads lose the old single-snapshot property. This catches appends, truncation, most rewrites and procfs files, and fails closed. | No detection (silent wrong hash); hash-while-copy to a private snapshot (doubles I/O and needs temp storage). | 0007 |
 | D5 | The hash is an info finding `hash.sha256` (Q3 = A). | No Result or schema change; escaped and checked like every finding. | `Result` field and schema v2; filling `Artifact.SHA256`. | - |
@@ -204,7 +204,7 @@ D1-D4 have long-term impact and go into ADR 0007, which supersedes ADR 0004 deci
 - PE `e_lfanew` as a little-endian uint32 at `0x3C`, followed by `"PE\0\0"`: Verified in `debug/pe/file.go`, which reads `binary.LittleEndian.Uint32(dosheader[0x3c:])` (go1.27.2).
 - `syscall.Stat_t` ctime fields: `Ctimespec` on darwin (Verified, `go doc syscall.Stat_t` on darwin/arm64) and `Ctim` on linux (Verified, `syscall/ztypes_linux_amd64.go`).
 - `(*os.File)(nil).ReadAt` returns `os.ErrInvalid` without panicking: Assumed; FR5 tests it.
-- SHA-256 throughput of 0.5-2 GB/s: Assumed; `BenchmarkHash` on the CI runner measures it and ADR 0007 records the figure.
+- SHA-256 throughput: Verified by `BenchmarkHash` (`go test -run xxx -bench Hash -count 10 ./internal/scanner/builtin/`) on an idle machine, Go 1.27.2: 950-1003 MB/s on darwin/arm64 (Apple M5 Pro) and 3.15-3.26 GB/s on linux/arm64 in a `golang:1.27` container (ADR 0007). A CI-runner figure is still pending.
 
 ## 6. Risks and failure modes
 
@@ -239,7 +239,7 @@ D1-D4 have long-term impact and go into ADR 0007, which supersedes ADR 0004 deci
 ## 8. Performance/scalability
 
 - Memory per scan: one 64 KiB hash buffer, a 512-byte header and a 4-byte PE probe, independent of file size (FR17).
-- Time: one sequential read of the file for the hash, up to two small reads for filetype, and one 1-byte probe. The worst case is about 1 GiB of SHA-256 (Assumed about 1 s; measured).
+- Time: one sequential read of the file for the hash, up to two small reads for filetype, and one 1-byte probe. The worst case is about 1 GiB of SHA-256 (about 1.1 s on the measured darwin/arm64 host and about 0.33 s on linux/arm64; ADR 0007).
 - Each artifact produces at most 5 findings, far below `MaxFindings`.
 - Directory scans and worker pools belong to REDACT-39.
 
