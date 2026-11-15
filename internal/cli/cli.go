@@ -59,7 +59,8 @@ success and carries only errors that stop the report. Untrusted strings are
 escaped, never printed raw. Flags must come before FILE. BREAKING: the stdout
 format changed, and failure lines and the summary moved from stderr to stdout.
 Files over 1 GiB are not scanned. Registered so far: hash (SHA-256) and filetype
-(type detected from content, extension mismatch, executable bit); more will be added.
+(type detected from content, extension mismatch, executable bit,
+deceptive name); more will be added.
 
 Consumers: check the exit code first (0 complete, 1 incomplete, 2 usage, 3
 I/O or report error), and treat empty or unparseable output as a failed scan,

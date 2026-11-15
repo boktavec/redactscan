@@ -2,8 +2,9 @@ package report
 
 import (
 	"strconv"
-	"unicode"
 	"unicode/utf8"
+
+	"github.com/boktavec/redactscan/internal/textsafe"
 )
 
 const (
@@ -13,15 +14,6 @@ const (
 	jsonEscapeBMP    = 6  // \uXXXX
 	jsonEscapePair   = 12 // \uXXXX\uXXXX
 )
-
-// isDangerous is the one rule both renderers use. strconv.IsPrint covers C0,
-// DEL, C1, bidi, format, separator and non-ASCII space runes. It accepts
-// invisible fillers and variation selectors, so those are added.
-func isDangerous(r rune) bool {
-	return !strconv.IsPrint(r) ||
-		unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
-		unicode.Is(unicode.Variation_Selector, r)
-}
 
 // appendText appends s with dangerous runes, invalid bytes and backslashes
 // written as visible escapes.
@@ -40,7 +32,7 @@ func appendEscaped(b []byte, s string, escapeQuote bool) []byte {
 			b = append(b, '\\', 'x', hexDigits[s[i]>>4], hexDigits[s[i]&0xf])
 		case r == '\\' || (escapeQuote && r == '"'):
 			b = append(b, '\\', byte(r))
-		case isDangerous(r):
+		case textsafe.IsDangerous(r):
 			// ToASCII also escapes printable runes such as U+034F.
 			q := strconv.QuoteRuneToASCII(r)
 			b = append(b, q[1:len(q)-1]...)
@@ -62,7 +54,7 @@ func escapeJSON(b []byte) ([]byte, error) {
 	extra := 0
 	for i := 0; i < len(b); {
 		r, size := utf8.DecodeRune(b[i:])
-		if r >= minDangerousJSON && isDangerous(r) {
+		if r >= minDangerousJSON && textsafe.IsDangerous(r) {
 			extra += jsonEscapeLen(r) - size
 		}
 		i += size
@@ -71,7 +63,7 @@ func escapeJSON(b []byte) ([]byte, error) {
 	for i := 0; i < len(b); {
 		r, size := utf8.DecodeRune(b[i:])
 		switch {
-		case r < minDangerousJSON || !isDangerous(r):
+		case r < minDangerousJSON || !textsafe.IsDangerous(r):
 			out = append(out, b[i:i+size]...)
 		case r <= maxBMP:
 			out = appendUnit(out, uint16(r))

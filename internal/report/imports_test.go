@@ -13,9 +13,10 @@ import (
 // allowedImports is the FR9 allowlist. fmt, os, net and log are absent on
 // purpose: widening it takes a reviewed edit.
 var allowedImports = []string{
-	"bytes", "encoding/json", "errors", "io", "math", "slices", "strconv", "unicode", "unicode/utf8",
+	"bytes", "encoding/json", "errors", "io", "math", "slices", "strconv", "unicode/utf8",
 	"github.com/boktavec/redactscan/internal/finding",
 	"github.com/boktavec/redactscan/internal/scanner",
+	"github.com/boktavec/redactscan/internal/textsafe",
 }
 
 func disallowedImports(t *testing.T, filename string, src any) []string {

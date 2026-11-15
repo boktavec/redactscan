@@ -177,7 +177,7 @@ The caller opens the file once through `safefs` and passes the file and its size
 
 `internal/report` renders a `scanner.Result` for `scan` as a text report or, with `-json`, a versioned JSON document (`schema_version` 1). It escapes every untrusted string visibly, writes once, and takes `status` only from `Result.Incomplete()`. See [ADR 0005](adr/0005-report-escaping-and-versioned-json.md).
 
-`HashScanner` and `FileTypeScanner` live in `internal/scanner/builtin`, which owns `Default()`; `scanner` never imports it. `FileTypeScanner` checks fixed-offset magic numbers only (ELF, Mach-O, PE, ZIP, gzip, `#!`), never parses, and flags an extension that contradicts the detected type.
+`HashScanner` and `FileTypeScanner` live in `internal/scanner/builtin`, which owns `Default()`; `scanner` never imports it. `FileTypeScanner` checks fixed-offset magic numbers only (ELF, Mach-O, PE, ZIP, gzip, `#!`), never parses, flags an extension that contradicts the detected type, and flags deceptive names (invisible or control runes, invalid UTF-8, `report.pdf.exe`-style double extensions) using `internal/textsafe`, the same rune rule the report uses for escaping.
 
 Initial scanners:
 
@@ -271,7 +271,7 @@ V1 should not execute unknown content.
 Analyze:
 
 ```text
-file signatures / magic bytes (offset 0 only, in `FileTypeScanner`; polyglots and appended archives are later work)
+file signatures / magic bytes (offset 0 only, in `FileTypeScanner`; polyglots and appended archives are later work); deceptive file names (`filetype.deceptive_name`)
 hashes
 permissions
 scripts

@@ -357,3 +357,18 @@ Three stacked PRs; each branches from the previous. Estimated sizes: PR 1 about 
 - ADR 0004 added (PR 1); `docs/threat-model.md` updated (PR 1 and PR 3); `docs/architecture.md` section 8 updated (PR 3).
 - Each PR uses `.github/pull_request_template.md`, links REDACT-39, this spec and ADR 0004, and lists manual steps: build a temp tree with an escaping symlink, a loop, a FIFO and a deep chain, run a small `go test -run` or example that prints Finding kinds and counters, and confirm `ErrIncomplete` and no hang.
 - `staff-engineering-reviewer` and `security-reviewer` pass on each PR.
+
+## 13. Requirements carried over from REDACT-37 (scanner reads and limits)
+
+REDACT-37 scans one file through an open-once, opaque `io.ReaderAt` ([ADR 0007](../../adr/0007-scanner-bounded-readerat-and-1gib-cap.md)) and leaves these limits to directory scans. Tracked in YouTrack REDACT-39. The threat model's Scanner section refers to them.
+
+| ID | Requirement | Acceptance |
+| --- | --- | --- |
+| RQ-D1 | A per-scan wall-clock deadline, as a context passed to `Registry.Run`. Expiry records `canceled` and the scan is incomplete. | A tiny deadline on a large sparse file gives `{hash, canceled}` and exit 1. |
+| RQ-D2 | An aggregate byte budget that counts the bytes each scanner actually reads, with its own incomplete reason. Never a silent skip. | A budget smaller than one file gives an incomplete result with that reason. |
+| RQ-D3 | Amplification limits: dedupe by (dev, inode) or count every hardlink against the budget, cap the file count and walk depth, and cap invalid-finding floods. | Tests with hardlinks, a deep tree, and a scanner that returns many invalid findings. |
+| RQ-D4 | Defaults measured on the slowest supported target. Record a CI-runner `BenchmarkHash` figure in ADR 0007 (it has only a dev-machine figure; keep 1 GiB Assumed until then). Consider a lower per-file cap in directory mode. | ADR 0007 holds the CI figure. |
+| RQ-D5 | SIGINT cancels the context and still prints an incomplete report. | A signal test gives an incomplete report and a non-zero exit. |
+| RQ-D6 | The future MCP or streaming path gets a per-request deadline, a concurrency cap and a per-client byte budget. | Specified with that story. |
+
+Also: ingest fills `Artifact.Mode` from fstat on the scanned descriptor (never `Lstat`), keeps the open-once opaque `ReaderAt`, and runs `checkUnchanged` for every artifact. Buffering scanners keep their own small caps and never allocate `size` bytes.

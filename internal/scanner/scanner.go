@@ -14,7 +14,8 @@
 //   - not start goroutines that outlive Scan or that can panic unrecovered;
 //   - read content only through the ReaderAt it is given: never past size,
 //     never keep it after Scan returns, and never allocate size bytes at once
-//     (a buffering scanner keeps its own small cap);
+//     (a buffering scanner keeps its own small cap; an aggregate byte budget and a
+//     per-scan deadline belong to REDACT-39);
 //   - not modify a.Metadata (shared and read-only; call
 //     scannertest.AssertNoMutation in its tests);
 //   - use only constant text in panics and errors, never scanned content;
@@ -22,6 +23,10 @@
 //     requires;
 //   - check ctx in long loops;
 //   - never execute, load or open anything named by the content.
+//
+// There is no per-scanner timeout and no SIGINT handling: a ReadAt that blocks
+// (a network or FUSE file) blocks the scan. This is accepted here; REDACT-39
+// owns deadlines and cancellation.
 //
 // Run wraps the caller's reader in an opaque bounded type, so a scanner cannot
 // reach the underlying file, and replaces read errors, which can carry paths,
